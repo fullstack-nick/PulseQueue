@@ -134,3 +134,55 @@ Phase 1 is complete only when:
 - A live GCP `demo.echo` job reaches `succeeded`.
 - PostgreSQL row state and API/worker logs are verified on the VM.
 - PostgreSQL and NATS are not exposed through public firewall rules.
+
+## Phase 1 Live Proof
+
+Recorded on 2026-07-04.
+
+```text
+GitHub repo: https://github.com/fullstack-nick/PulseQueue
+GitHub Actions: passed on main
+GCP project: pulsequeue-r7m5o9ld
+GCP VM: pulsequeue-phase1
+GCP region/zone: us-central1 / us-central1-a
+Live API: http://35.254.165.175:8080
+```
+
+Live health:
+
+```text
+/health/live 200 {"status":"live"}
+/health/ready 200 {"status":"ready"}
+```
+
+Live job proof:
+
+```text
+Submitted job: b00619a3-6f82-4ae0-bdec-74ac15762047
+Type: demo.echo
+Final status: succeeded
+Attempt count: 1
+```
+
+PostgreSQL readback on the GCP VM:
+
+```text
+id                                    queue    type       status     attempt_count
+b00619a3-6f82-4ae0-bdec-74ac15762047  default  demo.echo  succeeded  1
+```
+
+GCP firewall proof for the PulseQueue network:
+
+```text
+pulsequeue-allow-operator-api  213.225.10.35/32  tcp:8080,tcp:9090
+pulsequeue-allow-operator-ssh  213.225.10.35/32  tcp:22
+```
+
+Container exposure on the VM:
+
+```text
+api       0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp
+postgres 127.0.0.1:5432->5432/tcp
+nats      127.0.0.1:4222->4222/tcp, 127.0.0.1:8222->8222/tcp
+worker    no public ports
+```
