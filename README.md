@@ -319,3 +319,91 @@ postgres 127.0.0.1:5432->5432/tcp
 nats      127.0.0.1:4222->4222/tcp, 127.0.0.1:8222->8222/tcp
 worker    no public ports
 ```
+
+## Phase 3 Live Proof
+
+Recorded on 2026-07-04 UTC / 2026-07-05 Europe/Berlin.
+
+```text
+GitHub repo: https://github.com/fullstack-nick/PulseQueue
+GitHub Actions: passed on main for commit 08fd1d3715671a475f3dfccce2c6f189beb41b95
+GCP project: pulsequeue-r7m5o9ld
+GCP VM: pulsequeue-phase1
+GCP region/zone: us-central1 / us-central1-a
+Live API: http://35.254.165.175:8080
+Deployment path: local image build + docker load + Docker Compose recreate
+Live runtime: 2 worker replicas and 2 scheduler replicas
+```
+
+Live health:
+
+```text
+/health/live 200 {"status":"live"}
+/health/ready 200 {"status":"ready"}
+```
+
+Live Phase 3 behavior:
+
+```text
+Mixed-priority batch:
+0a0d4d61-8b0d-4dd9-8f2d-12940cf83f18  priority 1   succeeded  attempt_count 1
+4c9a29b1-0cf9-4eb1-b8f2-9ce07a92a1d8  priority 5   succeeded  attempt_count 1
+8588e4e9-da52-45ce-bb93-0ab30d38011f  priority 10  succeeded  attempt_count 1
+149619b7-36ac-460c-b1d2-b05b137196da  priority 3   succeeded  attempt_count 1
+bbb50d91-17e8-40e6-ab1b-9b756f2b09c7  priority 8   succeeded  attempt_count 1
+
+Delayed job:
+fb0e79f4-d770-4733-b2e2-2fb43b419b00  queued with attempt_count 0 before available_at
+fb0e79f4-d770-4733-b2e2-2fb43b419b00  succeeded with attempt_count 1 after scheduler wakeup
+
+Worker-crash recovery:
+d818cd4a-7fb8-4279-beb1-fa97b472ef3d  attempt 1 started on worker-4ccae78418d0
+deployments-worker-1 was killed while the job was running
+scheduler-d1f0b028a2a8 recovered the expired lease with error "job lease expired"
+d818cd4a-7fb8-4279-beb1-fa97b472ef3d  attempt 2 succeeded on worker-55d990e000cd
+```
+
+PostgreSQL readback on the GCP VM:
+
+```text
+version
+0001_create_jobs
+0002_reliable_execution
+0003_distributed_workers_scheduler
+
+workers
+worker-4ccae78418d0  running  concurrency=1  queues={default}
+worker-55d990e000cd  running  concurrency=1  queues={default}
+
+jobs
+0a0d4d61-8b0d-4dd9-8f2d-12940cf83f18  demo.echo   succeeded  attempt_count 1
+4c9a29b1-0cf9-4eb1-b8f2-9ce07a92a1d8  demo.echo   succeeded  attempt_count 1
+8588e4e9-da52-45ce-bb93-0ab30d38011f  demo.echo   succeeded  attempt_count 1
+149619b7-36ac-460c-b1d2-b05b137196da  demo.echo   succeeded  attempt_count 1
+bbb50d91-17e8-40e6-ab1b-9b756f2b09c7  demo.echo   succeeded  attempt_count 1
+fb0e79f4-d770-4733-b2e2-2fb43b419b00  demo.echo   succeeded  attempt_count 1
+d818cd4a-7fb8-4279-beb1-fa97b472ef3d  demo.sleep  succeeded  attempt_count 2
+
+job_id                                attempt_number  worker_id            status     error_message
+d818cd4a-7fb8-4279-beb1-fa97b472ef3d  1               worker-4ccae78418d0  failed     job lease expired
+d818cd4a-7fb8-4279-beb1-fa97b472ef3d  2               worker-55d990e000cd  succeeded
+```
+
+Container exposure on the VM:
+
+```text
+api          0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp
+postgres     127.0.0.1:5432->5432/tcp
+nats         127.0.0.1:4222->4222/tcp, 127.0.0.1:8222->8222/tcp
+scheduler-1  no public ports
+scheduler-2  no public ports
+worker-1     no public ports
+worker-2     no public ports
+```
+
+GCP firewall proof for the PulseQueue network:
+
+```text
+pulsequeue-allow-operator-api  213.225.10.35/32  tcp:8080,tcp:9090
+pulsequeue-allow-operator-ssh  213.225.10.35/32  tcp:22
+```
