@@ -44,6 +44,11 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "pulsequeue", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   worker:
     build:
@@ -57,7 +62,7 @@ services:
       PULSEQUEUE_NATS_URL: nats://nats:4222
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   postgres-data:
