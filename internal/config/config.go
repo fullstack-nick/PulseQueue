@@ -20,6 +20,10 @@ type Config struct {
 	WorkerQueue       string
 	PollInterval      time.Duration
 	LeaseDuration     time.Duration
+	WorkerHeartbeat   time.Duration
+	SchedulerID       string
+	SchedulerInterval time.Duration
+	SchedulerBatch    int32
 	RetryInitialDelay time.Duration
 	RetryMaxDelay     time.Duration
 }
@@ -36,6 +40,10 @@ func Load() Config {
 		WorkerQueue:       getEnv("PULSEQUEUE_WORKER_QUEUE", "default"),
 		PollInterval:      getDurationEnv("PULSEQUEUE_WORKER_POLL_INTERVAL", 5*time.Second),
 		LeaseDuration:     getDurationEnv("PULSEQUEUE_LEASE_DURATION", 60*time.Second),
+		WorkerHeartbeat:   getDurationEnv("PULSEQUEUE_WORKER_HEARTBEAT_INTERVAL", 10*time.Second),
+		SchedulerID:       getEnv("PULSEQUEUE_SCHEDULER_ID", hostnameSchedulerID()),
+		SchedulerInterval: getDurationEnv("PULSEQUEUE_SCHEDULER_INTERVAL", 2*time.Second),
+		SchedulerBatch:    int32(getIntEnv("PULSEQUEUE_SCHEDULER_BATCH_SIZE", 50)),
 		RetryInitialDelay: getDurationEnv("PULSEQUEUE_RETRY_INITIAL_DELAY", 2*time.Second),
 		RetryMaxDelay:     getDurationEnv("PULSEQUEUE_RETRY_MAX_DELAY", 30*time.Second),
 	}
@@ -89,10 +97,30 @@ func getDurationEnv(key string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
+func getIntEnv(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
 func hostnameWorkerID() string {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
 		return "worker-local"
 	}
 	return "worker-" + host
+}
+
+func hostnameSchedulerID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return "scheduler-local"
+	}
+	return "scheduler-" + host
 }

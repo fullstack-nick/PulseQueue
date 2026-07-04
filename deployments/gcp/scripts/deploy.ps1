@@ -22,7 +22,8 @@ try {
     docker build -t pulsequeue:deploy .
     docker tag pulsequeue:deploy deployments-api:latest
     docker tag pulsequeue:deploy deployments-worker:latest
-    docker save deployments-api:latest deployments-worker:latest -o $imageArchive
+    docker tag pulsequeue:deploy deployments-scheduler:latest
+    docker save deployments-api:latest deployments-worker:latest deployments-scheduler:latest -o $imageArchive
   }
 } finally {
   Pop-Location
@@ -44,6 +45,13 @@ PULSEQUEUE_OPERATOR_TOKEN=$OperatorToken
 PULSEQUEUE_API_URL=http://localhost:8080
 PULSEQUEUE_PUBLIC_HTTP_BIND=0.0.0.0
 PULSEQUEUE_PUBLIC_GRPC_BIND=0.0.0.0
+PULSEQUEUE_WORKER_QUEUE=default
+PULSEQUEUE_WORKER_CONCURRENCY=1
+PULSEQUEUE_WORKER_POLL_INTERVAL=5s
+PULSEQUEUE_WORKER_HEARTBEAT_INTERVAL=10s
+PULSEQUEUE_LEASE_DURATION=60s
+PULSEQUEUE_SCHEDULER_INTERVAL=2s
+PULSEQUEUE_SCHEDULER_BATCH_SIZE=50
 PULSEQUEUE_RETRY_INITIAL_DELAY=2s
 PULSEQUEUE_RETRY_MAX_DELAY=30s
 "@

@@ -31,6 +31,7 @@ type CreateJobRequest struct {
 	Priority       int32           `json:"priority"`
 	MaxAttempts    int32           `json:"max_attempts"`
 	TimeoutSeconds int32           `json:"timeout_seconds"`
+	DelaySeconds   int32           `json:"delay_seconds"`
 	IdempotencyKey string          `json:"idempotency_key"`
 }
 
@@ -56,6 +57,7 @@ func NewServer(store *storage.Store, signals *signals.Client, operatorToken stri
 		r.Get("/jobs", s.handleListJobs)
 		r.Get("/jobs/{id}", s.handleGetJob)
 		r.Get("/jobs/{id}/attempts", s.handleListJobAttempts)
+		r.Get("/workers", s.handleListWorkers)
 	})
 
 	return r
@@ -107,13 +109,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Priority:       req.Priority,
 		MaxAttempts:    req.MaxAttempts,
 		TimeoutSeconds: req.TimeoutSeconds,
+		DelaySeconds:   req.DelaySeconds,
 		IdempotencyKey: key,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !existing {
+	if !existing && req.DelaySeconds == 0 {
 		if err := s.signals.PublishJobAvailable(job.Queue); err != nil {
 			s.logger.Warn("job persisted but nats publish failed", "job_id", job.ID, "error", err)
 		}
@@ -181,6 +184,15 @@ func (s *Server) handleListJobAttempts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"attempts": attempts})
+}
+
+func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
+	workers, err := s.store.ListWorkers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list workers")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workers": workers})
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {

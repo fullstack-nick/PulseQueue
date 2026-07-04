@@ -10,6 +10,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PULSEQUEUE_API_URL", "")
 	t.Setenv("PULSEQUEUE_RETRY_INITIAL_DELAY", "")
 	t.Setenv("PULSEQUEUE_RETRY_MAX_DELAY", "")
+	t.Setenv("PULSEQUEUE_WORKER_HEARTBEAT_INTERVAL", "")
+	t.Setenv("PULSEQUEUE_SCHEDULER_INTERVAL", "")
+	t.Setenv("PULSEQUEUE_SCHEDULER_BATCH_SIZE", "")
 
 	cfg := Load()
 	if cfg.HTTPAddr != ":8080" {
@@ -23,6 +26,15 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.WorkerQueue != "default" {
 		t.Fatalf("unexpected WorkerQueue: %s", cfg.WorkerQueue)
+	}
+	if cfg.WorkerHeartbeat.String() != "10s" {
+		t.Fatalf("unexpected WorkerHeartbeat: %s", cfg.WorkerHeartbeat)
+	}
+	if cfg.SchedulerInterval.String() != "2s" {
+		t.Fatalf("unexpected SchedulerInterval: %s", cfg.SchedulerInterval)
+	}
+	if cfg.SchedulerBatch != 50 {
+		t.Fatalf("unexpected SchedulerBatch: %d", cfg.SchedulerBatch)
 	}
 	if cfg.RetryInitialDelay.String() != "2s" {
 		t.Fatalf("unexpected RetryInitialDelay: %s", cfg.RetryInitialDelay)
@@ -50,5 +62,22 @@ func TestLoadRetryDurations(t *testing.T) {
 	}
 	if cfg.RetryMaxDelay.String() != "2m0s" {
 		t.Fatalf("unexpected RetryMaxDelay: %s", cfg.RetryMaxDelay)
+	}
+}
+
+func TestLoadSchedulerConfig(t *testing.T) {
+	t.Setenv("PULSEQUEUE_SCHEDULER_INTERVAL", "3s")
+	t.Setenv("PULSEQUEUE_SCHEDULER_BATCH_SIZE", "7")
+	t.Setenv("PULSEQUEUE_WORKER_HEARTBEAT_INTERVAL", "4s")
+
+	cfg := Load()
+	if cfg.SchedulerInterval.String() != "3s" {
+		t.Fatalf("unexpected SchedulerInterval: %s", cfg.SchedulerInterval)
+	}
+	if cfg.SchedulerBatch != 7 {
+		t.Fatalf("unexpected SchedulerBatch: %d", cfg.SchedulerBatch)
+	}
+	if cfg.WorkerHeartbeat.String() != "4s" {
+		t.Fatalf("unexpected WorkerHeartbeat: %s", cfg.WorkerHeartbeat)
 	}
 }

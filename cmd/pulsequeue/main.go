@@ -21,6 +21,7 @@ import (
 	"github.com/fullstack-nick/PulseQueue/internal/api"
 	"github.com/fullstack-nick/PulseQueue/internal/config"
 	"github.com/fullstack-nick/PulseQueue/internal/grpcserver"
+	"github.com/fullstack-nick/PulseQueue/internal/scheduler"
 	"github.com/fullstack-nick/PulseQueue/internal/signals"
 	"github.com/fullstack-nick/PulseQueue/internal/storage"
 	"github.com/fullstack-nick/PulseQueue/internal/worker"
@@ -39,9 +40,11 @@ func newRootCommand() *cobra.Command {
 		Short: "PulseQueue durable job queue",
 	}
 	cmd.AddCommand(newServerCommand())
+	cmd.AddCommand(newSchedulerCommand())
 	cmd.AddCommand(newWorkerCommand())
 	cmd.AddCommand(newHealthCommand())
 	cmd.AddCommand(newJobsCommand())
+	cmd.AddCommand(newWorkersCommand())
 	return cmd
 }
 
@@ -100,6 +103,34 @@ func newServerCommand() *cobra.Command {
 	}
 }
 
+func newSchedulerCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "scheduler",
+		Short: "Run the PulseQueue scheduler",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg := config.Load()
+			if err := cfg.ValidateServer(); err != nil {
+				return err
+			}
+			logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			store, err := storage.Open(ctx, cfg.DatabaseURL)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			natsClient, err := signals.Connect(cfg.NATSURL)
+			if err != nil {
+				return err
+			}
+			defer natsClient.Close()
+			return scheduler.New(store, natsClient, cfg.SchedulerID, cfg.SchedulerInterval, cfg.SchedulerBatch, logger).Run(ctx)
+		},
+	}
+}
+
 func newWorkerCommand() *cobra.Command {
 	var queue string
 	var concurrency int
@@ -107,8 +138,8 @@ func newWorkerCommand() *cobra.Command {
 		Use:   "worker",
 		Short: "Run a PulseQueue worker",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if concurrency != 1 {
-				return errors.New("phase 1 supports --concurrency 1 only")
+			if concurrency <= 0 {
+				return errors.New("concurrency must be positive")
 			}
 			cfg := config.Load()
 			if err := cfg.ValidateServer(); err != nil {
@@ -130,7 +161,7 @@ func newWorkerCommand() *cobra.Command {
 				return err
 			}
 			defer natsClient.Close()
-			return worker.New(store, natsClient, queue, cfg.WorkerID, cfg.LeaseDuration, cfg.PollInterval, storage.RetryPolicy{
+			return worker.New(store, natsClient, queue, cfg.WorkerID, concurrency, cfg.LeaseDuration, cfg.PollInterval, cfg.WorkerHeartbeat, storage.RetryPolicy{
 				InitialDelay: cfg.RetryInitialDelay,
 				MaxDelay:     cfg.RetryMaxDelay,
 			}, logger).Run(ctx)
@@ -183,7 +214,7 @@ func newJobsCommand() *cobra.Command {
 
 func newJobsSubmitCommand() *cobra.Command {
 	var queue, jobType, payload, idempotencyKey, output string
-	var priority, maxAttempts, timeoutSeconds int32
+	var priority, maxAttempts, timeoutSeconds, delaySeconds int32
 	cmd := &cobra.Command{
 		Use:   "submit",
 		Short: "Submit a job",
@@ -203,6 +234,7 @@ func newJobsSubmitCommand() *cobra.Command {
 				Priority:       priority,
 				MaxAttempts:    maxAttempts,
 				TimeoutSeconds: timeoutSeconds,
+				DelaySeconds:   delaySeconds,
 				IdempotencyKey: idempotencyKey,
 			}
 			var result api.CreateJobResponse
@@ -222,6 +254,7 @@ func newJobsSubmitCommand() *cobra.Command {
 	cmd.Flags().Int32Var(&priority, "priority", 0, "job priority")
 	cmd.Flags().Int32Var(&maxAttempts, "max-attempts", 1, "maximum attempts")
 	cmd.Flags().Int32Var(&timeoutSeconds, "timeout-seconds", 0, "job timeout in seconds, 0 disables timeout")
+	cmd.Flags().Int32Var(&delaySeconds, "delay-seconds", 0, "delay before the job is eligible for execution")
 	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "idempotency key")
 	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
 	return cmd
@@ -319,6 +352,50 @@ func newJobsAttemptsCommand() *cobra.Command {
 					message = fmt.Sprintf(" error=%q", *attempt.ErrorMessage)
 				}
 				fmt.Printf("%d\t%s\t%s\t%s%s%s\n", attempt.AttemptNumber, attempt.ID, attempt.WorkerID, attempt.Status, duration, message)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func newWorkersCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "workers",
+		Short: "Inspect workers",
+	}
+	cmd.AddCommand(newWorkersListCommand())
+	return cmd
+}
+
+func newWorkersListCommand() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List registered workers",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg := config.Load()
+			if err := cfg.ValidateClient(); err != nil {
+				return err
+			}
+			var result struct {
+				Workers []storage.Worker `json:"workers"`
+			}
+			if err := doJSON(cmd.Context(), cfg, http.MethodGet, "/workers", nil, &result); err != nil {
+				return err
+			}
+			if output == "json" {
+				return printJSON(result)
+			}
+			for _, worker := range result.Workers {
+				fmt.Printf("%s\t%s\tstatus=%s\tconcurrency=%d\tlast_heartbeat=%s\n",
+					worker.ID,
+					strings.Join(worker.Queues, ","),
+					worker.Status,
+					worker.Concurrency,
+					worker.LastHeartbeatAt.Format(time.RFC3339),
+				)
 			}
 			return nil
 		},

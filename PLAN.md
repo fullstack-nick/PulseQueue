@@ -8,6 +8,12 @@ The product direction is a smaller, polished version of systems such as Temporal
 
 PulseQueue is also a GCP cloud-native project under a strict free-tier discipline. Every implementation phase must end with the code pushed to GitHub, deployed to GCP, and verified live. Local success is useful during development, but it does not make a phase complete. Nothing important should remain local-only: every feature, deployment artifact, operational script, and demo path must have a live-GCP verification path.
 
+Development environment note:
+
+```text
+On this Windows environment, Go is installed at C:\Program Files\Go\bin\go.exe but is not currently on PATH. Run Go commands with the explicit path, for example: & 'C:\Program Files\Go\bin\go.exe' test ./...
+```
+
 ## 1. Core Product Idea
 
 A user should be able to run commands like:
@@ -1145,6 +1151,12 @@ Goal:
 
 ```text
 Multiple workers and scheduler replicas can safely process jobs on GCP without unsafe duplicate completion.
+```
+
+Implementation note:
+
+```text
+Start Phase 3 live deployment from the `-BuildImageLocally` deploy path. Remote Docker builds on the free-tier e2-micro VM proved unreliable during Phase 2, while locally building the Linux image, loading it onto the VM, and recreating Docker Compose services worked reliably.
 ```
 
 ### Phase 4 - Cron, CLI, and Logs

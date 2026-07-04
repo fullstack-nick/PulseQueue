@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fullstack-nick/PulseQueue/internal/signals"
@@ -13,63 +16,158 @@ import (
 )
 
 type Runner struct {
-	store         *storage.Store
-	signals       *signals.Client
-	queue         string
-	workerID      string
-	leaseDuration time.Duration
-	pollInterval  time.Duration
-	retryPolicy   storage.RetryPolicy
-	logger        *slog.Logger
+	store             *storage.Store
+	signals           *signals.Client
+	queue             string
+	workerID          string
+	concurrency       int
+	leaseDuration     time.Duration
+	pollInterval      time.Duration
+	heartbeatInterval time.Duration
+	retryPolicy       storage.RetryPolicy
+	logger            *slog.Logger
 }
 
-func New(store *storage.Store, signals *signals.Client, queue, workerID string, leaseDuration, pollInterval time.Duration, retryPolicy storage.RetryPolicy, logger *slog.Logger) *Runner {
+func New(store *storage.Store, signals *signals.Client, queue, workerID string, concurrency int, leaseDuration, pollInterval, heartbeatInterval time.Duration, retryPolicy storage.RetryPolicy, logger *slog.Logger) *Runner {
 	if queue == "" {
 		queue = "default"
 	}
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = 10 * time.Second
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Runner{
-		store:         store,
-		signals:       signals,
-		queue:         queue,
-		workerID:      workerID,
-		leaseDuration: leaseDuration,
-		pollInterval:  pollInterval,
-		retryPolicy:   retryPolicy.Normalize(),
-		logger:        logger,
+		store:             store,
+		signals:           signals,
+		queue:             queue,
+		workerID:          workerID,
+		concurrency:       concurrency,
+		leaseDuration:     leaseDuration,
+		pollInterval:      pollInterval,
+		heartbeatInterval: heartbeatInterval,
+		retryPolicy:       retryPolicy.Normalize(),
+		logger:            logger,
 	}
 }
 
 func (r *Runner) Run(ctx context.Context) error {
-	wake := make(chan struct{}, 1)
+	if err := r.register(ctx); err != nil {
+		return err
+	}
+
+	wake := make(chan struct{}, r.concurrency)
 	sub, err := r.signals.SubscribeJobAvailable(r.queue, func() {
-		select {
-		case wake <- struct{}{}:
-		default:
-		}
+		r.signalWake(wake)
 	})
 	if err != nil {
 		return err
 	}
 	defer sub.Unsubscribe()
 
+	var status atomic.Value
+	status.Store(storage.WorkerStatusRunning)
+	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
+	defer stopHeartbeat()
+	go r.heartbeat(heartbeatCtx, &status)
+
+	acceptCtx, stopAccepting := context.WithCancel(context.Background())
+	defer stopAccepting()
+
+	var wg sync.WaitGroup
+	for i := 0; i < r.concurrency; i++ {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			r.workLoop(acceptCtx, wake, slot)
+		}(i + 1)
+	}
+
+	r.signalWake(wake)
+	r.logger.Info("worker started", "queue", r.queue, "worker_id", r.workerID, "concurrency", r.concurrency)
+
+	<-ctx.Done()
+	status.Store(storage.WorkerStatusDraining)
+	if err := r.store.MarkWorkerStatus(context.Background(), r.workerID, storage.WorkerStatusDraining); err != nil {
+		r.logger.Warn("worker draining status update failed", "worker_id", r.workerID, "error", err)
+	}
+	stopAccepting()
+	wg.Wait()
+	stopHeartbeat()
+	if err := r.store.MarkWorkerStatus(context.Background(), r.workerID, storage.WorkerStatusStopped); err != nil {
+		r.logger.Warn("worker stopped status update failed", "worker_id", r.workerID, "error", err)
+	}
+	r.logger.Info("worker stopped", "queue", r.queue, "worker_id", r.workerID)
+	return nil
+}
+
+func (r *Runner) register(ctx context.Context) error {
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "unknown"
+	}
+	_, err = r.store.RegisterWorker(ctx, storage.RegisterWorkerParams{
+		ID:          r.workerID,
+		Hostname:    hostname,
+		Queues:      []string{r.queue},
+		Concurrency: int32(r.concurrency),
+		Metadata:    json.RawMessage(`{"runtime":"go"}`),
+	})
+	return err
+}
+
+func (r *Runner) heartbeat(ctx context.Context, status *atomic.Value) {
+	ticker := time.NewTicker(r.heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		current, _ := status.Load().(string)
+		if current == "" {
+			current = storage.WorkerStatusRunning
+		}
+		if err := r.store.HeartbeatWorker(ctx, r.workerID, current, r.leaseDuration); err != nil {
+			r.logger.Warn("worker heartbeat failed", "worker_id", r.workerID, "status", current, "error", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *Runner) signalWake(wake chan<- struct{}) {
+	for i := 0; i < r.concurrency; i++ {
+		select {
+		case wake <- struct{}{}:
+		default:
+			return
+		}
+	}
+}
+
+func (r *Runner) workLoop(ctx context.Context, wake <-chan struct{}, slot int) {
 	ticker := time.NewTicker(r.pollInterval)
 	defer ticker.Stop()
 
-	r.logger.Info("worker started", "queue", r.queue, "worker_id", r.workerID)
 	for {
-		if err := r.drain(ctx); err != nil {
-			r.logger.Error("worker drain failed", "error", err)
+		if err := r.drain(ctx, slot); err != nil {
+			r.logger.Error("worker drain failed", "worker_id", r.workerID, "slot", slot, "error", err)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return
 		case <-wake:
 		case <-ticker.C:
 		}
 	}
 }
 
-func (r *Runner) drain(ctx context.Context) error {
+func (r *Runner) drain(ctx context.Context, slot int) error {
 	for {
 		claimed, ok, err := r.store.ClaimJob(ctx, r.queue, r.workerID, r.leaseDuration)
 		if err != nil {
@@ -78,11 +176,16 @@ func (r *Runner) drain(ctx context.Context) error {
 		if !ok {
 			return nil
 		}
-		r.execute(ctx, claimed)
+		r.execute(context.Background(), claimed, slot)
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
 	}
 }
 
-func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob) {
+func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob, slot int) {
 	job := claimed.Job
 	attempt := claimed.Attempt
 	if job.LeaseToken == nil {
@@ -96,6 +199,7 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob) {
 		"queue", job.Queue,
 		"type", job.Type,
 		"worker_id", r.workerID,
+		"slot", slot,
 		"status", job.Status,
 	)
 
@@ -112,11 +216,11 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob) {
 		if errors.Is(err, context.DeadlineExceeded) {
 			message = "job timed out"
 		}
-		r.fail(ctx, claimed, message, time.Since(started))
+		r.fail(context.Background(), claimed, message, time.Since(started), slot)
 		return
 	}
 
-	if err := r.store.CompleteJob(ctx, job.ID, *job.LeaseToken); err != nil {
+	if err := r.store.CompleteJob(context.Background(), job.ID, *job.LeaseToken); err != nil {
 		r.logger.Error("job completion failed",
 			"job_id", job.ID,
 			"attempt_id", attempt.ID,
@@ -124,6 +228,7 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob) {
 			"queue", job.Queue,
 			"type", job.Type,
 			"worker_id", r.workerID,
+			"slot", slot,
 			"duration_ms", time.Since(started).Milliseconds(),
 			"error", err,
 		)
@@ -136,6 +241,7 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob) {
 		"queue", job.Queue,
 		"type", job.Type,
 		"worker_id", r.workerID,
+		"slot", slot,
 		"status", storage.StatusSucceeded,
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
@@ -188,7 +294,7 @@ func (r *Runner) runHandler(ctx context.Context, job storage.Job) error {
 	}
 }
 
-func (r *Runner) fail(ctx context.Context, claimed storage.ClaimedJob, message string, duration time.Duration) {
+func (r *Runner) fail(ctx context.Context, claimed storage.ClaimedJob, message string, duration time.Duration, slot int) {
 	job := claimed.Job
 	attempt := claimed.Attempt
 	if job.LeaseToken == nil {
@@ -204,6 +310,7 @@ func (r *Runner) fail(ctx context.Context, claimed storage.ClaimedJob, message s
 			"queue", job.Queue,
 			"type", job.Type,
 			"worker_id", r.workerID,
+			"slot", slot,
 			"duration_ms", duration.Milliseconds(),
 			"error", err,
 		)
@@ -216,6 +323,7 @@ func (r *Runner) fail(ctx context.Context, claimed storage.ClaimedJob, message s
 		"queue", job.Queue,
 		"type", job.Type,
 		"worker_id", r.workerID,
+		"slot", slot,
 		"status", updated.Status,
 		"duration_ms", duration.Milliseconds(),
 		"error", message,

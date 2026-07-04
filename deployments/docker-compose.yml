@@ -54,12 +54,28 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    command: ["worker", "--queue", "${PULSEQUEUE_WORKER_QUEUE:-default}", "--concurrency", "1"]
+    command: ["worker", "--queue", "${PULSEQUEUE_WORKER_QUEUE:-default}", "--concurrency", "${PULSEQUEUE_WORKER_CONCURRENCY:-1}"]
     env_file:
       - ../.env
     environment:
       PULSEQUEUE_DATABASE_URL: postgres://${POSTGRES_USER:-pulsequeue}:${POSTGRES_PASSWORD:-pulsequeue}@postgres:5432/${POSTGRES_DB:-pulsequeue}?sslmode=disable
       PULSEQUEUE_NATS_URL: nats://nats:4222
+      PULSEQUEUE_WORKER_ID: ${PULSEQUEUE_WORKER_ID:-}
+    depends_on:
+      api:
+        condition: service_healthy
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["scheduler"]
+    env_file:
+      - ../.env
+    environment:
+      PULSEQUEUE_DATABASE_URL: postgres://${POSTGRES_USER:-pulsequeue}:${POSTGRES_PASSWORD:-pulsequeue}@postgres:5432/${POSTGRES_DB:-pulsequeue}?sslmode=disable
+      PULSEQUEUE_NATS_URL: nats://nats:4222
+      PULSEQUEUE_SCHEDULER_ID: ${PULSEQUEUE_SCHEDULER_ID:-}
     depends_on:
       api:
         condition: service_healthy

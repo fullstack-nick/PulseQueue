@@ -42,3 +42,27 @@ func TestJobsSubmitIncludesTimeoutFlag(t *testing.T) {
 		t.Fatal("expected timeout-seconds flag")
 	}
 }
+
+func TestJobsSubmitIncludesDelayFlag(t *testing.T) {
+	cmd := newJobsSubmitCommand()
+	if cmd.Flags().Lookup("delay-seconds") == nil {
+		t.Fatal("expected delay-seconds flag")
+	}
+}
+
+func TestRootCommandIncludesSchedulerAndWorkers(t *testing.T) {
+	cmd := newRootCommand()
+	if _, _, err := cmd.Find([]string{"scheduler"}); err != nil {
+		t.Fatal("expected scheduler command")
+	}
+	if _, _, err := cmd.Find([]string{"workers", "list"}); err != nil {
+		t.Fatal("expected workers list command")
+	}
+}
+
+func TestWorkerCommandAcceptsConcurrencyGreaterThanOne(t *testing.T) {
+	cmd := newWorkerCommand()
+	if err := cmd.Flags().Set("concurrency", "3"); err != nil {
+		t.Fatalf("expected concurrency flag to accept 3: %v", err)
+	}
+}

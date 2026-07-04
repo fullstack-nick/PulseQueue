@@ -27,6 +27,11 @@ const (
 	AttemptStatusRunning   = "running"
 	AttemptStatusSucceeded = "succeeded"
 	AttemptStatusFailed    = "failed"
+
+	WorkerStatusStarting = "starting"
+	WorkerStatusRunning  = "running"
+	WorkerStatusDraining = "draining"
+	WorkerStatusStopped  = "stopped"
 )
 
 const jobSelectColumns = `
@@ -38,6 +43,11 @@ const jobSelectColumns = `
 const jobAttemptSelectColumns = `
 	id, job_id, worker_id, lease_token, attempt_number, status,
 	started_at, finished_at, error_message, duration_ms
+`
+
+const workerSelectColumns = `
+	id, hostname, queues, status, concurrency, metadata,
+	started_at, last_heartbeat_at, updated_at
 `
 
 type Store struct {
@@ -88,6 +98,18 @@ type ClaimedJob struct {
 	Attempt JobAttempt `json:"attempt"`
 }
 
+type Worker struct {
+	ID              string          `json:"id"`
+	Hostname        string          `json:"hostname"`
+	Queues          []string        `json:"queues"`
+	Status          string          `json:"status"`
+	Concurrency     int32           `json:"concurrency"`
+	Metadata        json.RawMessage `json:"metadata"`
+	StartedAt       time.Time       `json:"started_at"`
+	LastHeartbeatAt time.Time       `json:"last_heartbeat_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
 type RetryPolicy struct {
 	InitialDelay time.Duration
 	MaxDelay     time.Duration
@@ -100,7 +122,16 @@ type CreateJobParams struct {
 	Priority       int32
 	MaxAttempts    int32
 	TimeoutSeconds int32
+	DelaySeconds   int32
 	IdempotencyKey *string
+}
+
+type RegisterWorkerParams struct {
+	ID          string
+	Hostname    string
+	Queues      []string
+	Concurrency int32
+	Metadata    json.RawMessage
 }
 
 type ListJobsFilter struct {
@@ -192,6 +223,9 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (Job, bool, er
 	if p.TimeoutSeconds < 0 {
 		return Job{}, false, errors.New("timeout_seconds must be non-negative")
 	}
+	if p.DelaySeconds < 0 {
+		return Job{}, false, errors.New("delay_seconds must be non-negative")
+	}
 	if len(p.Payload) == 0 {
 		p.Payload = []byte(`{}`)
 	}
@@ -201,10 +235,10 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (Job, bool, er
 
 	job, err := scanJob(s.pool.QueryRow(ctx, fmt.Sprintf(`
 		INSERT INTO jobs (queue, type, payload, status, priority, max_attempts, timeout_seconds, idempotency_key, available_at)
-		VALUES ($1, $2, $3, 'queued', $4, $5, NULLIF($6, 0), NULLIF($7, ''), now())
+		VALUES ($1, $2, $3, 'queued', $4, $5, NULLIF($6, 0), NULLIF($7, ''), now() + $8::interval)
 		ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 		RETURNING %s
-	`, jobSelectColumns), p.Queue, p.Type, p.Payload, p.Priority, p.MaxAttempts, p.TimeoutSeconds, nullableStringValue(p.IdempotencyKey)))
+	`, jobSelectColumns), p.Queue, p.Type, p.Payload, p.Priority, p.MaxAttempts, p.TimeoutSeconds, nullableStringValue(p.IdempotencyKey), intervalLiteral(time.Duration(p.DelaySeconds)*time.Second)))
 	if err == nil {
 		return job, false, nil
 	}
@@ -278,6 +312,255 @@ func (s *Store) ListJobAttempts(ctx context.Context, jobID uuid.UUID) ([]JobAtte
 	return attempts, rows.Err()
 }
 
+func (s *Store) ListDueQueues(ctx context.Context, limit int32) ([]string, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT queue
+		FROM jobs
+		WHERE status IN ('queued', 'retry_scheduled')
+		  AND available_at <= now()
+		ORDER BY queue ASC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var queues []string
+	for rows.Next() {
+		var queue string
+		if err := rows.Scan(&queue); err != nil {
+			return nil, err
+		}
+		queues = append(queues, queue)
+	}
+	return queues, rows.Err()
+}
+
+func (s *Store) RegisterWorker(ctx context.Context, p RegisterWorkerParams) (Worker, error) {
+	if strings.TrimSpace(p.ID) == "" {
+		return Worker{}, errors.New("worker id is required")
+	}
+	if strings.TrimSpace(p.Hostname) == "" {
+		p.Hostname = "unknown"
+	}
+	p.Queues = normalizeQueues(p.Queues)
+	if p.Concurrency <= 0 {
+		p.Concurrency = 1
+	}
+	if len(p.Metadata) == 0 {
+		p.Metadata = []byte(`{}`)
+	}
+	if !json.Valid(p.Metadata) {
+		return Worker{}, errors.New("worker metadata must be valid JSON")
+	}
+
+	return scanWorker(s.pool.QueryRow(ctx, fmt.Sprintf(`
+		INSERT INTO workers (id, hostname, queues, status, concurrency, metadata, started_at, last_heartbeat_at, updated_at)
+		VALUES ($1, $2, $3, 'running', $4, $5, now(), now(), now())
+		ON CONFLICT (id) DO UPDATE
+		SET hostname = EXCLUDED.hostname,
+		    queues = EXCLUDED.queues,
+		    status = 'running',
+		    concurrency = EXCLUDED.concurrency,
+		    metadata = EXCLUDED.metadata,
+		    started_at = now(),
+		    last_heartbeat_at = now(),
+		    updated_at = now()
+		RETURNING %s
+	`, workerSelectColumns), p.ID, p.Hostname, p.Queues, p.Concurrency, p.Metadata))
+}
+
+func (s *Store) HeartbeatWorker(ctx context.Context, workerID, status string, leaseDuration time.Duration) error {
+	if strings.TrimSpace(workerID) == "" {
+		return errors.New("worker id is required")
+	}
+	if status == "" {
+		status = WorkerStatusRunning
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE workers
+		SET status = $2,
+		    last_heartbeat_at = now(),
+		    updated_at = now()
+		WHERE id = $1
+	`, workerID, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("worker heartbeat rejected for unknown worker")
+	}
+
+	if leaseDuration > 0 {
+		if _, err := tx.Exec(ctx, `
+			UPDATE jobs
+			SET locked_until = now() + $2::interval,
+			    updated_at = now()
+			WHERE locked_by = $1
+			  AND status = 'running'
+			  AND lease_token IS NOT NULL
+		`, workerID, intervalLiteral(leaseDuration)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) MarkWorkerStatus(ctx context.Context, workerID, status string) error {
+	if strings.TrimSpace(workerID) == "" {
+		return errors.New("worker id is required")
+	}
+	if status == "" {
+		return errors.New("worker status is required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE workers
+		SET status = $2,
+		    updated_at = now()
+		WHERE id = $1
+	`, workerID, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("worker status update rejected for unknown worker")
+	}
+	return nil
+}
+
+func (s *Store) ListWorkers(ctx context.Context) ([]Worker, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+		SELECT %s
+		FROM workers
+		ORDER BY last_heartbeat_at DESC, id ASC
+	`, workerSelectColumns))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var workers []Worker
+	for rows.Next() {
+		worker, err := scanWorker(rows)
+		if err != nil {
+			return nil, err
+		}
+		workers = append(workers, worker)
+	}
+	return workers, rows.Err()
+}
+
+func (s *Store) RecoverExpiredJobs(ctx context.Context, batch int32, reason string) ([]Job, error) {
+	if batch <= 0 || batch > 100 {
+		batch = 50
+	}
+	if reason == "" {
+		reason = "job lease expired"
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, fmt.Sprintf(`
+		SELECT %s
+		FROM jobs
+		WHERE status = 'running'
+		  AND locked_until IS NOT NULL
+		  AND locked_until <= now()
+		ORDER BY locked_until ASC, created_at ASC
+		FOR UPDATE SKIP LOCKED
+		LIMIT $1
+	`, jobSelectColumns), batch)
+	if err != nil {
+		return nil, err
+	}
+
+	var expired []Job
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		expired = append(expired, job)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	updated := make([]Job, 0, len(expired))
+	for _, job := range expired {
+		if job.LeaseToken != nil {
+			if _, err := tx.Exec(ctx, `
+				UPDATE job_attempts
+				SET status = 'failed',
+				    finished_at = now(),
+				    error_message = $3,
+				    duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::bigint)
+				WHERE job_id = $1
+				  AND lease_token = $2
+				  AND status = 'running'
+			`, job.ID, *job.LeaseToken, reason); err != nil {
+				return nil, err
+			}
+		}
+
+		var recovered Job
+		if job.AttemptCount < normalizedMaxAttempts(job.MaxAttempts) {
+			recovered, err = scanJob(tx.QueryRow(ctx, fmt.Sprintf(`
+				UPDATE jobs
+				SET status = 'retry_scheduled',
+				    available_at = now(),
+				    completed_at = NULL,
+				    updated_at = now(),
+				    locked_by = NULL,
+				    locked_until = NULL,
+				    lease_token = NULL,
+				    last_error = $2
+				WHERE id = $1
+				RETURNING %s
+			`, jobSelectColumns), job.ID, reason))
+		} else {
+			recovered, err = scanJob(tx.QueryRow(ctx, fmt.Sprintf(`
+				UPDATE jobs
+				SET status = 'dead_letter',
+				    completed_at = now(),
+				    dead_lettered_at = now(),
+				    updated_at = now(),
+				    locked_by = NULL,
+				    locked_until = NULL,
+				    lease_token = NULL,
+				    last_error = $2
+				WHERE id = $1
+				RETURNING %s
+			`, jobSelectColumns), job.ID, reason))
+		}
+		if err != nil {
+			return nil, err
+		}
+		updated = append(updated, recovered)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 func (s *Store) ClaimJob(ctx context.Context, queue, workerID string, leaseDuration time.Duration) (ClaimedJob, bool, error) {
 	if queue == "" {
 		queue = "default"
@@ -297,10 +580,8 @@ func (s *Store) ClaimJob(ctx context.Context, queue, workerID string, leaseDurat
 			SELECT id
 			FROM jobs
 			WHERE queue = $1
-			  AND (
-			    status = 'queued'
-			    OR (status = 'retry_scheduled' AND available_at <= now())
-			  )
+			  AND status IN ('queued', 'retry_scheduled')
+			  AND available_at <= now()
 			ORDER BY priority DESC, available_at ASC, created_at ASC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
@@ -544,11 +825,47 @@ func scanJobAttempt(row scanner) (JobAttempt, error) {
 	return attempt, err
 }
 
+func scanWorker(row scanner) (Worker, error) {
+	var worker Worker
+	err := row.Scan(
+		&worker.ID,
+		&worker.Hostname,
+		&worker.Queues,
+		&worker.Status,
+		&worker.Concurrency,
+		&worker.Metadata,
+		&worker.StartedAt,
+		&worker.LastHeartbeatAt,
+		&worker.UpdatedAt,
+	)
+	return worker, err
+}
+
 func nullableStringValue(v *string) string {
 	if v == nil {
 		return ""
 	}
 	return *v
+}
+
+func normalizeQueues(queues []string) []string {
+	seen := map[string]struct{}{}
+	var normalized []string
+	for _, queue := range queues {
+		queue = strings.TrimSpace(queue)
+		if queue == "" {
+			continue
+		}
+		if _, ok := seen[queue]; ok {
+			continue
+		}
+		seen[queue] = struct{}{}
+		normalized = append(normalized, queue)
+	}
+	if len(normalized) == 0 {
+		normalized = []string{"default"}
+	}
+	return normalized
 }
 
 func intervalLiteral(d time.Duration) string {

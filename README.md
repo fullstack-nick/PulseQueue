@@ -24,6 +24,15 @@ Phase 2 adds reliable execution:
 - Built-in `demo.fail` and `demo.sleep` handlers for failure proof
 - CLI/API attempt inspection
 
+Phase 3 adds distributed worker and scheduler coordination:
+
+- Worker registration and heartbeats
+- Configurable worker concurrency
+- Scheduler reconciliation for due jobs and expired leases
+- Delayed job submission with `delay_seconds`
+- REST/CLI worker visibility
+- Docker Compose scheduler service for local and GCP VM deployment
+
 ## Quickstart
 
 Create a local env file:
@@ -75,6 +84,13 @@ go run ./cmd/pulsequeue jobs status JOB_ID
 go run ./cmd/pulsequeue jobs attempts JOB_ID
 ```
 
+Exercise delayed jobs and worker visibility:
+
+```powershell
+go run ./cmd/pulsequeue jobs submit --type demo.echo --delay-seconds 10 --payload '{"message":"delayed"}'
+go run ./cmd/pulsequeue workers list
+```
+
 ## API
 
 Unauthenticated:
@@ -91,6 +107,7 @@ POST /jobs
 GET  /jobs
 GET  /jobs/{id}
 GET  /jobs/{id}/attempts
+GET  /workers
 ```
 
 Example:
@@ -103,6 +120,7 @@ $body = @{
   payload = @{ message = "hello from api" }
   max_attempts = 3
   timeout_seconds = 10
+  delay_seconds = 0
 } | ConvertTo-Json
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/jobs -Headers $headers -Body $body -ContentType "application/json"
 ```

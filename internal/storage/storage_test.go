@@ -127,6 +127,85 @@ func TestFailedJobSchedulesAndClaimsDueRetry(t *testing.T) {
 	}
 }
 
+func TestPriorityOrderingAmongDueJobs(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	low := createTestJob(t, store, CreateJobParams{
+		Queue:       "default",
+		Type:        "demo.echo",
+		Payload:     json.RawMessage(`{"message":"low"}`),
+		Priority:    1,
+		MaxAttempts: 1,
+	})
+	high := createTestJob(t, store, CreateJobParams{
+		Queue:       "default",
+		Type:        "demo.echo",
+		Payload:     json.RawMessage(`{"message":"high"}`),
+		Priority:    10,
+		MaxAttempts: 1,
+	})
+
+	claimed, ok, err := store.ClaimJob(ctx, "default", "worker-test", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected claim")
+	}
+	if claimed.Job.ID != high.ID {
+		t.Fatalf("claimed job %s, want high priority job %s; low was %s", claimed.Job.ID, high.ID, low.ID)
+	}
+}
+
+func TestDelayedQueuedJobIsNotClaimableBeforeAvailableAt(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	job := createTestJob(t, store, CreateJobParams{
+		Queue:        "default",
+		Type:         "demo.echo",
+		Payload:      json.RawMessage(`{"message":"later"}`),
+		MaxAttempts:  1,
+		DelaySeconds: 3600,
+	})
+
+	if _, ok, err := store.ClaimJob(ctx, "default", "worker-test", time.Minute); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("delayed queued job should not be claimable before available_at")
+	}
+
+	queues, err := store.ListDueQueues(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queues) != 0 {
+		t.Fatalf("due queues = %v, want none", queues)
+	}
+
+	if _, err := store.pool.Exec(ctx, `UPDATE jobs SET available_at = now() WHERE id = $1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	queues, err = store.ListDueQueues(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queues) != 1 || queues[0] != "default" {
+		t.Fatalf("due queues = %v, want [default]", queues)
+	}
+	claimed, ok, err := store.ClaimJob(ctx, "default", "worker-test", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected delayed job to become claimable")
+	}
+	if claimed.Job.ID != job.ID {
+		t.Fatalf("claimed job %s, want %s", claimed.Job.ID, job.ID)
+	}
+}
+
 func TestFailedJobMovesToDeadLetterWhenAttemptsExhausted(t *testing.T) {
 	store := openIntegrationStore(t)
 	ctx := context.Background()
@@ -168,6 +247,129 @@ func TestFailedJobMovesToDeadLetterWhenAttemptsExhausted(t *testing.T) {
 	}
 }
 
+func TestRecoverExpiredJobIsIdempotentAndRejectsStaleCompletion(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	job := createTestJob(t, store, CreateJobParams{
+		Queue:       "default",
+		Type:        "demo.sleep",
+		Payload:     json.RawMessage(`{"duration_ms":1000}`),
+		MaxAttempts: 2,
+	})
+	claimed, ok, err := store.ClaimJob(ctx, "default", "worker-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected claim")
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = $1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := store.RecoverExpiredJobs(ctx, 10, "lease expired in test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered) != 1 {
+		t.Fatalf("recovered count = %d, want 1", len(recovered))
+	}
+	if recovered[0].Status != StatusRetryScheduled {
+		t.Fatalf("recovered status = %s, want %s", recovered[0].Status, StatusRetryScheduled)
+	}
+
+	recoveredAgain, err := store.RecoverExpiredJobs(ctx, 10, "lease expired in test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recoveredAgain) != 0 {
+		t.Fatalf("second recovery count = %d, want 0", len(recoveredAgain))
+	}
+	if err := store.CompleteJob(ctx, claimed.Job.ID, *claimed.Job.LeaseToken); err == nil {
+		t.Fatal("expected stale completion rejection after recovery")
+	}
+	if _, err := store.FailJob(ctx, claimed.Job.ID, *claimed.Job.LeaseToken, "stale", RetryPolicy{}); err == nil {
+		t.Fatal("expected stale failure rejection after recovery")
+	}
+
+	attempts, err := store.ListJobAttempts(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempt count = %d, want 1", len(attempts))
+	}
+	if attempts[0].Status != AttemptStatusFailed {
+		t.Fatalf("attempt status = %s, want %s", attempts[0].Status, AttemptStatusFailed)
+	}
+	if attempts[0].ErrorMessage == nil || *attempts[0].ErrorMessage != "lease expired in test" {
+		t.Fatalf("attempt error = %v, want lease expired in test", attempts[0].ErrorMessage)
+	}
+
+	retry, ok, err := store.ClaimJob(ctx, "default", "worker-b", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected recovered job to be claimable")
+	}
+	if retry.Attempt.AttemptNumber != 2 {
+		t.Fatalf("retry attempt = %d, want 2", retry.Attempt.AttemptNumber)
+	}
+}
+
+func TestConcurrentRecoverExpiredJobsRecoversOnce(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	job := createTestJob(t, store, CreateJobParams{
+		Queue:       "default",
+		Type:        "demo.sleep",
+		Payload:     json.RawMessage(`{"duration_ms":1000}`),
+		MaxAttempts: 2,
+	})
+	if _, ok, err := store.ClaimJob(ctx, "default", "worker-a", time.Minute); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Fatal("expected claim")
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = $1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	const schedulers = 2
+	counts := make(chan int, schedulers)
+	errs := make(chan error, schedulers)
+	var wg sync.WaitGroup
+	for i := 0; i < schedulers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recovered, err := store.RecoverExpiredJobs(ctx, 10, "lease expired concurrently")
+			if err != nil {
+				errs <- err
+				return
+			}
+			counts <- len(recovered)
+		}()
+	}
+	wg.Wait()
+	close(counts)
+	close(errs)
+
+	for err := range errs {
+		t.Fatal(err)
+	}
+	total := 0
+	for count := range counts {
+		total += count
+	}
+	if total != 1 {
+		t.Fatalf("total recovered = %d, want 1", total)
+	}
+}
+
 func TestLeaseFencingRejectsStaleCompletionAndFailure(t *testing.T) {
 	store := openIntegrationStore(t)
 	ctx := context.Background()
@@ -195,6 +397,51 @@ func TestLeaseFencingRejectsStaleCompletionAndFailure(t *testing.T) {
 	}
 	if err := store.CompleteJob(ctx, claimed.Job.ID, *claimed.Job.LeaseToken); err != nil {
 		t.Fatalf("valid completion failed: %v", err)
+	}
+}
+
+func TestWorkerRegistrationHeartbeatAndStatuses(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	worker, err := store.RegisterWorker(ctx, RegisterWorkerParams{
+		ID:          "worker-a",
+		Hostname:    "host-a",
+		Queues:      []string{"default", "emails", "default"},
+		Concurrency: 3,
+		Metadata:    json.RawMessage(`{"test":true}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.Status != WorkerStatusRunning {
+		t.Fatalf("status = %s, want %s", worker.Status, WorkerStatusRunning)
+	}
+	if worker.Concurrency != 3 {
+		t.Fatalf("concurrency = %d, want 3", worker.Concurrency)
+	}
+	if len(worker.Queues) != 2 || worker.Queues[0] != "default" || worker.Queues[1] != "emails" {
+		t.Fatalf("queues = %v, want [default emails]", worker.Queues)
+	}
+
+	if err := store.HeartbeatWorker(ctx, "worker-a", WorkerStatusRunning, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkWorkerStatus(ctx, "worker-a", WorkerStatusDraining); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkWorkerStatus(ctx, "worker-a", WorkerStatusStopped); err != nil {
+		t.Fatal(err)
+	}
+	workers, err := store.ListWorkers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("worker count = %d, want 1", len(workers))
+	}
+	if workers[0].Status != WorkerStatusStopped {
+		t.Fatalf("worker status = %s, want %s", workers[0].Status, WorkerStatusStopped)
 	}
 }
 
@@ -268,7 +515,7 @@ func openIntegrationStore(t *testing.T) *Store {
 	if err := store.ApplyMigrations(ctx, migrationsDir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.pool.Exec(ctx, `TRUNCATE TABLE job_attempts, jobs RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := store.pool.Exec(ctx, `TRUNCATE TABLE job_attempts, jobs, workers RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	return store
