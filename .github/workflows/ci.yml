@@ -8,6 +8,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: pulsequeue
+          POSTGRES_PASSWORD: pulsequeue
+          POSTGRES_DB: pulsequeue
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pulsequeue -d pulsequeue"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -16,6 +30,8 @@ jobs:
       - name: Download modules
         run: go mod download
       - name: Test
+        env:
+          PULSEQUEUE_TEST_DATABASE_URL: postgres://pulsequeue:pulsequeue@localhost:5432/pulsequeue?sslmode=disable
         run: go test ./...
       - name: Vet
         run: go vet ./...

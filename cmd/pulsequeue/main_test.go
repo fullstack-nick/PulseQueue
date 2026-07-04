@@ -35,3 +35,10 @@ func TestReadPayloadRejectsInvalidJSON(t *testing.T) {
 		t.Fatal("expected invalid JSON error")
 	}
 }
+
+func TestJobsSubmitIncludesTimeoutFlag(t *testing.T) {
+	cmd := newJobsSubmitCommand()
+	if cmd.Flags().Lookup("timeout-seconds") == nil {
+		t.Fatal("expected timeout-seconds flag")
+	}
+}

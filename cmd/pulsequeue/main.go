@@ -130,7 +130,10 @@ func newWorkerCommand() *cobra.Command {
 				return err
 			}
 			defer natsClient.Close()
-			return worker.New(store, natsClient, queue, cfg.WorkerID, cfg.LeaseDuration, cfg.PollInterval, logger).Run(ctx)
+			return worker.New(store, natsClient, queue, cfg.WorkerID, cfg.LeaseDuration, cfg.PollInterval, storage.RetryPolicy{
+				InitialDelay: cfg.RetryInitialDelay,
+				MaxDelay:     cfg.RetryMaxDelay,
+			}, logger).Run(ctx)
 		},
 	}
 	cmd.Flags().StringVar(&queue, "queue", "default", "queue to process")
@@ -174,12 +177,13 @@ func newJobsCommand() *cobra.Command {
 	cmd.AddCommand(newJobsSubmitCommand())
 	cmd.AddCommand(newJobsListCommand())
 	cmd.AddCommand(newJobsStatusCommand())
+	cmd.AddCommand(newJobsAttemptsCommand())
 	return cmd
 }
 
 func newJobsSubmitCommand() *cobra.Command {
 	var queue, jobType, payload, idempotencyKey, output string
-	var priority, maxAttempts int32
+	var priority, maxAttempts, timeoutSeconds int32
 	cmd := &cobra.Command{
 		Use:   "submit",
 		Short: "Submit a job",
@@ -198,6 +202,7 @@ func newJobsSubmitCommand() *cobra.Command {
 				Payload:        rawPayload,
 				Priority:       priority,
 				MaxAttempts:    maxAttempts,
+				TimeoutSeconds: timeoutSeconds,
 				IdempotencyKey: idempotencyKey,
 			}
 			var result api.CreateJobResponse
@@ -216,6 +221,7 @@ func newJobsSubmitCommand() *cobra.Command {
 	cmd.Flags().StringVar(&payload, "payload", "{}", "JSON payload, @file path, or file path")
 	cmd.Flags().Int32Var(&priority, "priority", 0, "job priority")
 	cmd.Flags().Int32Var(&maxAttempts, "max-attempts", 1, "maximum attempts")
+	cmd.Flags().Int32Var(&timeoutSeconds, "timeout-seconds", 0, "job timeout in seconds, 0 disables timeout")
 	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "idempotency key")
 	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
 	return cmd
@@ -276,6 +282,44 @@ func newJobsStatusCommand() *cobra.Command {
 				return printJSON(result)
 			}
 			fmt.Printf("%s\t%s\t%s\t%s\tattempts=%d\n", result.Job.ID, result.Job.Queue, result.Job.Type, result.Job.Status, result.Job.AttemptCount)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func newJobsAttemptsCommand() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{
+		Use:   "attempts <job-id>",
+		Short: "List attempts for a job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := config.Load()
+			if err := cfg.ValidateClient(); err != nil {
+				return err
+			}
+			var result struct {
+				Attempts []storage.JobAttempt `json:"attempts"`
+			}
+			if err := doJSON(cmd.Context(), cfg, http.MethodGet, "/jobs/"+args[0]+"/attempts", nil, &result); err != nil {
+				return err
+			}
+			if output == "json" {
+				return printJSON(result)
+			}
+			for _, attempt := range result.Attempts {
+				duration := ""
+				if attempt.DurationMS != nil {
+					duration = fmt.Sprintf(" duration_ms=%d", *attempt.DurationMS)
+				}
+				message := ""
+				if attempt.ErrorMessage != nil {
+					message = fmt.Sprintf(" error=%q", *attempt.ErrorMessage)
+				}
+				fmt.Printf("%d\t%s\t%s\t%s%s%s\n", attempt.AttemptNumber, attempt.ID, attempt.WorkerID, attempt.Status, duration, message)
+			}
 			return nil
 		},
 	}

@@ -30,6 +30,7 @@ type CreateJobRequest struct {
 	Payload        json.RawMessage `json:"payload"`
 	Priority       int32           `json:"priority"`
 	MaxAttempts    int32           `json:"max_attempts"`
+	TimeoutSeconds int32           `json:"timeout_seconds"`
 	IdempotencyKey string          `json:"idempotency_key"`
 }
 
@@ -54,6 +55,7 @@ func NewServer(store *storage.Store, signals *signals.Client, operatorToken stri
 		r.Post("/jobs", s.handleCreateJob)
 		r.Get("/jobs", s.handleListJobs)
 		r.Get("/jobs/{id}", s.handleGetJob)
+		r.Get("/jobs/{id}/attempts", s.handleListJobAttempts)
 	})
 
 	return r
@@ -104,6 +106,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Payload:        req.Payload,
 		Priority:       req.Priority,
 		MaxAttempts:    req.MaxAttempts,
+		TimeoutSeconds: req.TimeoutSeconds,
 		IdempotencyKey: key,
 	})
 	if err != nil {
@@ -156,6 +159,28 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+func (s *Server) handleListJobAttempts(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	if _, err := s.store.GetJob(r.Context(), id); err != nil {
+		if storage.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get job")
+		return
+	}
+	attempts, err := s.store.ListJobAttempts(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list job attempts")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"attempts": attempts})
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {

@@ -17,11 +17,28 @@ import (
 )
 
 const (
-	StatusQueued    = "queued"
-	StatusRunning   = "running"
-	StatusSucceeded = "succeeded"
-	StatusFailed    = "failed"
+	StatusQueued         = "queued"
+	StatusRunning        = "running"
+	StatusSucceeded      = "succeeded"
+	StatusFailed         = "failed"
+	StatusRetryScheduled = "retry_scheduled"
+	StatusDeadLetter     = "dead_letter"
+
+	AttemptStatusRunning   = "running"
+	AttemptStatusSucceeded = "succeeded"
+	AttemptStatusFailed    = "failed"
 )
+
+const jobSelectColumns = `
+	id, queue, type, payload, status, priority, max_attempts, attempt_count,
+	idempotency_key, locked_by, locked_until, lease_token, timeout_seconds,
+	available_at, dead_lettered_at, created_at, updated_at, completed_at, last_error
+`
+
+const jobAttemptSelectColumns = `
+	id, job_id, worker_id, lease_token, attempt_number, status,
+	started_at, finished_at, error_message, duration_ms
+`
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -44,10 +61,36 @@ type Job struct {
 	LockedBy       *string         `json:"locked_by,omitempty"`
 	LockedUntil    *time.Time      `json:"locked_until,omitempty"`
 	LeaseToken     *uuid.UUID      `json:"lease_token,omitempty"`
+	TimeoutSeconds *int32          `json:"timeout_seconds,omitempty"`
+	AvailableAt    time.Time       `json:"available_at"`
+	DeadLetteredAt *time.Time      `json:"dead_lettered_at,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
 	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
 	LastError      *string         `json:"last_error,omitempty"`
+}
+
+type JobAttempt struct {
+	ID            uuid.UUID  `json:"id"`
+	JobID         uuid.UUID  `json:"job_id"`
+	WorkerID      string     `json:"worker_id"`
+	LeaseToken    uuid.UUID  `json:"lease_token"`
+	AttemptNumber int32      `json:"attempt_number"`
+	Status        string     `json:"status"`
+	StartedAt     time.Time  `json:"started_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	ErrorMessage  *string    `json:"error_message,omitempty"`
+	DurationMS    *int64     `json:"duration_ms,omitempty"`
+}
+
+type ClaimedJob struct {
+	Job     Job        `json:"job"`
+	Attempt JobAttempt `json:"attempt"`
+}
+
+type RetryPolicy struct {
+	InitialDelay time.Duration
+	MaxDelay     time.Duration
 }
 
 type CreateJobParams struct {
@@ -56,6 +99,7 @@ type CreateJobParams struct {
 	Payload        json.RawMessage
 	Priority       int32
 	MaxAttempts    int32
+	TimeoutSeconds int32
 	IdempotencyKey *string
 }
 
@@ -142,11 +186,11 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (Job, bool, er
 	if p.Queue == "" {
 		p.Queue = "default"
 	}
-	if p.Priority == 0 {
-		p.Priority = 0
-	}
 	if p.MaxAttempts <= 0 {
 		p.MaxAttempts = 1
+	}
+	if p.TimeoutSeconds < 0 {
+		return Job{}, false, errors.New("timeout_seconds must be non-negative")
 	}
 	if len(p.Payload) == 0 {
 		p.Payload = []byte(`{}`)
@@ -155,41 +199,31 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (Job, bool, er
 		return Job{}, false, errors.New("payload must be valid JSON")
 	}
 
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	job, err := scanJob(s.pool.QueryRow(ctx, fmt.Sprintf(`
+		INSERT INTO jobs (queue, type, payload, status, priority, max_attempts, timeout_seconds, idempotency_key, available_at)
+		VALUES ($1, $2, $3, 'queued', $4, $5, NULLIF($6, 0), NULLIF($7, ''), now())
+		ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+		RETURNING %s
+	`, jobSelectColumns), p.Queue, p.Type, p.Payload, p.Priority, p.MaxAttempts, p.TimeoutSeconds, nullableStringValue(p.IdempotencyKey)))
+	if err == nil {
+		return job, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Job{}, false, err
+	}
+	if p.IdempotencyKey == nil || *p.IdempotencyKey == "" {
+		return Job{}, false, errors.New("job insert returned no row")
+	}
+
+	existing, err := scanJob(s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT %s FROM jobs WHERE idempotency_key = $1`, jobSelectColumns), *p.IdempotencyKey))
 	if err != nil {
 		return Job{}, false, err
 	}
-	defer tx.Rollback(ctx)
-
-	if p.IdempotencyKey != nil && *p.IdempotencyKey != "" {
-		existing, err := scanJob(tx.QueryRow(ctx, `SELECT id, queue, type, payload, status, priority, max_attempts, attempt_count, idempotency_key, locked_by, locked_until, lease_token, created_at, updated_at, completed_at, last_error FROM jobs WHERE idempotency_key = $1`, *p.IdempotencyKey))
-		if err == nil {
-			if err := tx.Commit(ctx); err != nil {
-				return Job{}, false, err
-			}
-			return existing, true, nil
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return Job{}, false, err
-		}
-	}
-
-	job, err := scanJob(tx.QueryRow(ctx, `
-		INSERT INTO jobs (queue, type, payload, status, priority, max_attempts, idempotency_key)
-		VALUES ($1, $2, $3, 'queued', $4, $5, NULLIF($6, ''))
-		RETURNING id, queue, type, payload, status, priority, max_attempts, attempt_count, idempotency_key, locked_by, locked_until, lease_token, created_at, updated_at, completed_at, last_error
-	`, p.Queue, p.Type, p.Payload, p.Priority, p.MaxAttempts, nullableStringValue(p.IdempotencyKey)))
-	if err != nil {
-		return Job{}, false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Job{}, false, err
-	}
-	return job, false, nil
+	return existing, true, nil
 }
 
 func (s *Store) GetJob(ctx context.Context, id uuid.UUID) (Job, error) {
-	return scanJob(s.pool.QueryRow(ctx, `SELECT id, queue, type, payload, status, priority, max_attempts, attempt_count, idempotency_key, locked_by, locked_until, lease_token, created_at, updated_at, completed_at, last_error FROM jobs WHERE id = $1`, id))
+	return scanJob(s.pool.QueryRow(ctx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = $1`, jobSelectColumns), id))
 }
 
 func (s *Store) ListJobs(ctx context.Context, filter ListJobsFilter) ([]Job, error) {
@@ -197,14 +231,14 @@ func (s *Store) ListJobs(ctx context.Context, filter ListJobsFilter) ([]Job, err
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, queue, type, payload, status, priority, max_attempts, attempt_count, idempotency_key, locked_by, locked_until, lease_token, created_at, updated_at, completed_at, last_error
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+		SELECT %s
 		FROM jobs
 		WHERE ($1 = '' OR status = $1)
 		  AND ($2 = '' OR queue = $2)
 		ORDER BY created_at DESC
 		LIMIT $3
-	`, filter.Status, filter.Queue, limit)
+	`, jobSelectColumns), filter.Status, filter.Queue, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -221,21 +255,53 @@ func (s *Store) ListJobs(ctx context.Context, filter ListJobsFilter) ([]Job, err
 	return jobs, rows.Err()
 }
 
-func (s *Store) ClaimJob(ctx context.Context, queue, workerID string, leaseDuration time.Duration) (Job, bool, error) {
+func (s *Store) ListJobAttempts(ctx context.Context, jobID uuid.UUID) ([]JobAttempt, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+		SELECT %s
+		FROM job_attempts
+		WHERE job_id = $1
+		ORDER BY attempt_number ASC
+	`, jobAttemptSelectColumns), jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var attempts []JobAttempt
+	for rows.Next() {
+		attempt, err := scanJobAttempt(rows)
+		if err != nil {
+			return nil, err
+		}
+		attempts = append(attempts, attempt)
+	}
+	return attempts, rows.Err()
+}
+
+func (s *Store) ClaimJob(ctx context.Context, queue, workerID string, leaseDuration time.Duration) (ClaimedJob, bool, error) {
+	if queue == "" {
+		queue = "default"
+	}
+	if workerID == "" {
+		workerID = "worker-unknown"
+	}
 	leaseToken := uuid.New()
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return Job{}, false, err
+		return ClaimedJob{}, false, err
 	}
 	defer tx.Rollback(ctx)
 
-	job, err := scanJob(tx.QueryRow(ctx, `
+	job, err := scanJob(tx.QueryRow(ctx, fmt.Sprintf(`
 		WITH picked AS (
 			SELECT id
 			FROM jobs
-			WHERE status = 'queued'
-			  AND queue = $1
-			ORDER BY priority DESC, created_at ASC
+			WHERE queue = $1
+			  AND (
+			    status = 'queued'
+			    OR (status = 'retry_scheduled' AND available_at <= now())
+			  )
+			ORDER BY priority DESC, available_at ASC, created_at ASC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
@@ -247,31 +313,48 @@ func (s *Store) ClaimJob(ctx context.Context, queue, workerID string, leaseDurat
 		    attempt_count = attempt_count + 1,
 		    updated_at = now()
 		WHERE id IN (SELECT id FROM picked)
-		RETURNING id, queue, type, payload, status, priority, max_attempts, attempt_count, idempotency_key, locked_by, locked_until, lease_token, created_at, updated_at, completed_at, last_error
-	`, queue, workerID, fmt.Sprintf("%f seconds", leaseDuration.Seconds()), leaseToken))
+		RETURNING %s
+	`, jobSelectColumns), queue, workerID, intervalLiteral(leaseDuration), leaseToken))
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.Commit(ctx); err != nil {
-			return Job{}, false, err
+			return ClaimedJob{}, false, err
 		}
-		return Job{}, false, nil
+		return ClaimedJob{}, false, nil
 	}
 	if err != nil {
-		return Job{}, false, err
+		return ClaimedJob{}, false, err
+	}
+
+	attempt, err := scanJobAttempt(tx.QueryRow(ctx, fmt.Sprintf(`
+		INSERT INTO job_attempts (job_id, worker_id, lease_token, attempt_number, status)
+		VALUES ($1, $2, $3, $4, 'running')
+		RETURNING %s
+	`, jobAttemptSelectColumns), job.ID, workerID, leaseToken, job.AttemptCount))
+	if err != nil {
+		return ClaimedJob{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Job{}, false, err
+		return ClaimedJob{}, false, err
 	}
-	return job, true, nil
+	return ClaimedJob{Job: job, Attempt: attempt}, true, nil
 }
 
 func (s *Store) CompleteJob(ctx context.Context, id uuid.UUID, leaseToken uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE jobs
 		SET status = 'succeeded',
 		    completed_at = now(),
 		    updated_at = now(),
 		    locked_by = NULL,
-		    locked_until = NULL
+		    locked_until = NULL,
+		    lease_token = NULL,
+		    last_error = NULL
 		WHERE id = $1
 		  AND lease_token = $2
 		  AND status = 'running'
@@ -282,29 +365,136 @@ func (s *Store) CompleteJob(ctx context.Context, id uuid.UUID, leaseToken uuid.U
 	if tag.RowsAffected() != 1 {
 		return errors.New("job completion rejected by lease fencing")
 	}
-	return nil
-}
 
-func (s *Store) FailJob(ctx context.Context, id uuid.UUID, leaseToken uuid.UUID, message string) error {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE jobs
-		SET status = 'failed',
-		    completed_at = now(),
-		    updated_at = now(),
-		    locked_by = NULL,
-		    locked_until = NULL,
-		    last_error = $3
-		WHERE id = $1
+	tag, err = tx.Exec(ctx, `
+		UPDATE job_attempts
+		SET status = 'succeeded',
+		    finished_at = now(),
+		    duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::bigint)
+		WHERE job_id = $1
 		  AND lease_token = $2
 		  AND status = 'running'
-	`, id, leaseToken, message)
+	`, id, leaseToken)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() != 1 {
-		return errors.New("job failure rejected by lease fencing")
+		return errors.New("job attempt completion rejected by lease fencing")
 	}
-	return nil
+
+	return tx.Commit(ctx)
+}
+
+func (s *Store) FailJob(ctx context.Context, id uuid.UUID, leaseToken uuid.UUID, message string, policy RetryPolicy) (Job, error) {
+	policy = policy.Normalize()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return Job{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	job, err := scanJob(tx.QueryRow(ctx, fmt.Sprintf(`
+		SELECT %s
+		FROM jobs
+		WHERE id = $1
+		  AND lease_token = $2
+		  AND status = 'running'
+		FOR UPDATE
+	`, jobSelectColumns), id, leaseToken))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Job{}, errors.New("job failure rejected by lease fencing")
+	}
+	if err != nil {
+		return Job{}, err
+	}
+
+	var updated Job
+	if job.AttemptCount < normalizedMaxAttempts(job.MaxAttempts) {
+		delay := policy.DelayForAttempt(job.AttemptCount)
+		updated, err = scanJob(tx.QueryRow(ctx, fmt.Sprintf(`
+			UPDATE jobs
+			SET status = 'retry_scheduled',
+			    available_at = now() + $2::interval,
+			    completed_at = NULL,
+			    updated_at = now(),
+			    locked_by = NULL,
+			    locked_until = NULL,
+			    lease_token = NULL,
+			    last_error = $3
+			WHERE id = $1
+			RETURNING %s
+		`, jobSelectColumns), id, intervalLiteral(delay), message))
+	} else {
+		updated, err = scanJob(tx.QueryRow(ctx, fmt.Sprintf(`
+			UPDATE jobs
+			SET status = 'dead_letter',
+			    completed_at = now(),
+			    dead_lettered_at = now(),
+			    updated_at = now(),
+			    locked_by = NULL,
+			    locked_until = NULL,
+			    lease_token = NULL,
+			    last_error = $2
+			WHERE id = $1
+			RETURNING %s
+		`, jobSelectColumns), id, message))
+	}
+	if err != nil {
+		return Job{}, err
+	}
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE job_attempts
+		SET status = 'failed',
+		    finished_at = now(),
+		    error_message = $3,
+		    duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::bigint)
+		WHERE job_id = $1
+		  AND lease_token = $2
+		  AND status = 'running'
+	`, id, leaseToken, message)
+	if err != nil {
+		return Job{}, err
+	}
+	if tag.RowsAffected() != 1 {
+		return Job{}, errors.New("job attempt failure rejected by lease fencing")
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Job{}, err
+	}
+	return updated, nil
+}
+
+func (p RetryPolicy) Normalize() RetryPolicy {
+	if p.InitialDelay <= 0 {
+		p.InitialDelay = 2 * time.Second
+	}
+	if p.MaxDelay <= 0 {
+		p.MaxDelay = 30 * time.Second
+	}
+	if p.MaxDelay < p.InitialDelay {
+		p.MaxDelay = p.InitialDelay
+	}
+	return p
+}
+
+func (p RetryPolicy) DelayForAttempt(attemptNumber int32) time.Duration {
+	p = p.Normalize()
+	if attemptNumber <= 1 {
+		return p.InitialDelay
+	}
+	delay := p.InitialDelay
+	for i := int32(1); i < attemptNumber; i++ {
+		if delay >= p.MaxDelay/2 {
+			return p.MaxDelay
+		}
+		delay *= 2
+	}
+	if delay > p.MaxDelay {
+		return p.MaxDelay
+	}
+	return delay
 }
 
 type scanner interface {
@@ -326,6 +516,9 @@ func scanJob(row scanner) (Job, error) {
 		&job.LockedBy,
 		&job.LockedUntil,
 		&job.LeaseToken,
+		&job.TimeoutSeconds,
+		&job.AvailableAt,
+		&job.DeadLetteredAt,
 		&job.CreatedAt,
 		&job.UpdatedAt,
 		&job.CompletedAt,
@@ -334,9 +527,40 @@ func scanJob(row scanner) (Job, error) {
 	return job, err
 }
 
+func scanJobAttempt(row scanner) (JobAttempt, error) {
+	var attempt JobAttempt
+	err := row.Scan(
+		&attempt.ID,
+		&attempt.JobID,
+		&attempt.WorkerID,
+		&attempt.LeaseToken,
+		&attempt.AttemptNumber,
+		&attempt.Status,
+		&attempt.StartedAt,
+		&attempt.FinishedAt,
+		&attempt.ErrorMessage,
+		&attempt.DurationMS,
+	)
+	return attempt, err
+}
+
 func nullableStringValue(v *string) string {
 	if v == nil {
 		return ""
 	}
 	return *v
+}
+
+func intervalLiteral(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	return fmt.Sprintf("%f seconds", d.Seconds())
+}
+
+func normalizedMaxAttempts(maxAttempts int32) int32 {
+	if maxAttempts <= 0 {
+		return 1
+	}
+	return maxAttempts
 }

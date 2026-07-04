@@ -27,6 +27,7 @@ message CreateJobRequest {
   int32 priority = 4;
   int32 max_attempts = 5;
   string idempotency_key = 6;
+  int32 timeout_seconds = 7;
 }
 
 message CreateJobResponse {
@@ -66,4 +67,7 @@ message Job {
   string updated_at = 11;
   string completed_at = 12;
   string last_error = 13;
+  int32 timeout_seconds = 14;
+  string available_at = 15;
+  string dead_lettered_at = 16;
 }
