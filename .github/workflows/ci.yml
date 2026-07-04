@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.4"
+      - name: Download modules
+        run: go mod download
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Docker build
+        run: docker build -t pulsequeue:ci .
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.8"
+      - name: Terraform fmt
+        run: terraform -chdir=deployments/gcp/terraform fmt -check
+      - name: Terraform validate
+        run: |
+          terraform -chdir=deployments/gcp/terraform init -backend=false
+          terraform -chdir=deployments/gcp/terraform validate

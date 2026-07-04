@@ -1,0 +1,4 @@
+project_id    = "pulsequeue-r7m5o9ld"
+region        = "us-central1"
+zone          = "us-central1-a"
+operator_cidr = "203.0.113.10/32"

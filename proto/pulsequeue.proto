@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package pulsequeue.v1;
+
+option go_package = "github.com/fullstack-nick/PulseQueue/internal/pb;pulsequeuepb";
+
+service HealthService {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+service JobService {
+  rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+}
+
+message CreateJobRequest {
+  string queue = 1;
+  string type = 2;
+  string payload_json = 3;
+  int32 priority = 4;
+  int32 max_attempts = 5;
+  string idempotency_key = 6;
+}
+
+message CreateJobResponse {
+  Job job = 1;
+  bool existing = 2;
+}
+
+message GetJobRequest {
+  string id = 1;
+}
+
+message GetJobResponse {
+  Job job = 1;
+}
+
+message ListJobsRequest {
+  string status = 1;
+  string queue = 2;
+  int32 limit = 3;
+}
+
+message ListJobsResponse {
+  repeated Job jobs = 1;
+}
+
+message Job {
+  string id = 1;
+  string queue = 2;
+  string type = 3;
+  string payload_json = 4;
+  string status = 5;
+  int32 priority = 6;
+  int32 max_attempts = 7;
+  int32 attempt_count = 8;
+  string idempotency_key = 9;
+  string created_at = 10;
+  string updated_at = 11;
+  string completed_at = 12;
+  string last_error = 13;
+}

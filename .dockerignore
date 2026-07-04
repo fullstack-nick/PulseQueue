@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+!.env.example
+
+.terraform
+**/.terraform
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+
+bin
+dist
+tmp
+*.exe
+coverage.out
