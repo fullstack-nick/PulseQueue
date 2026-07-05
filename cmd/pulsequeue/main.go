@@ -22,6 +22,7 @@ import (
 	"github.com/fullstack-nick/PulseQueue/internal/api"
 	"github.com/fullstack-nick/PulseQueue/internal/config"
 	"github.com/fullstack-nick/PulseQueue/internal/grpcserver"
+	"github.com/fullstack-nick/PulseQueue/internal/observability"
 	"github.com/fullstack-nick/PulseQueue/internal/scheduler"
 	"github.com/fullstack-nick/PulseQueue/internal/signals"
 	"github.com/fullstack-nick/PulseQueue/internal/storage"
@@ -63,6 +64,16 @@ func newServerCommand() *cobra.Command {
 			logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			serviceName := serviceNameOrDefault(cfg, "pulsequeue-api")
+			shutdownTracing, err := observability.InitTracing(ctx, observability.TracingConfig{
+				ServiceName: serviceName,
+				Endpoint:    cfg.OTLPEndpoint,
+			})
+			if err != nil {
+				return err
+			}
+			defer shutdownTracingWithTimeout(shutdownTracing)
+			metrics := observability.NewMetrics(serviceName)
 
 			store, err := storage.Open(ctx, cfg.DatabaseURL)
 			if err != nil {
@@ -72,6 +83,7 @@ func newServerCommand() *cobra.Command {
 			if err := store.ApplyMigrations(ctx, "migrations"); err != nil {
 				return err
 			}
+			metrics.RegisterStoreCollector(store)
 			natsClient, err := signals.Connect(cfg.NATSURL)
 			if err != nil {
 				return err
@@ -80,7 +92,7 @@ func newServerCommand() *cobra.Command {
 
 			httpServer := &http.Server{
 				Addr:              cfg.HTTPAddr,
-				Handler:           api.NewServer(store, natsClient, cfg.OperatorToken, logger),
+				Handler:           api.NewServer(store, natsClient, cfg.OperatorToken, logger, metrics),
 				ReadHeaderTimeout: 5 * time.Second,
 			}
 			errCh := make(chan error, 2)
@@ -118,6 +130,19 @@ func newSchedulerCommand() *cobra.Command {
 			logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			serviceName := serviceNameOrDefault(cfg, "pulsequeue-scheduler")
+			shutdownTracing, err := observability.InitTracing(ctx, observability.TracingConfig{
+				ServiceName: serviceName,
+				Endpoint:    cfg.OTLPEndpoint,
+			})
+			if err != nil {
+				return err
+			}
+			defer shutdownTracingWithTimeout(shutdownTracing)
+			metrics := observability.NewMetrics(serviceName)
+			if err := observability.ServeMetrics(ctx, cfg.MetricsAddr, metrics.Handler(), logger); err != nil {
+				return err
+			}
 
 			store, err := storage.Open(ctx, cfg.DatabaseURL)
 			if err != nil {
@@ -129,7 +154,7 @@ func newSchedulerCommand() *cobra.Command {
 				return err
 			}
 			defer natsClient.Close()
-			return scheduler.New(store, natsClient, cfg.SchedulerID, cfg.SchedulerInterval, cfg.SchedulerBatch, logger).Run(ctx)
+			return scheduler.New(store, natsClient, cfg.SchedulerID, cfg.SchedulerInterval, cfg.SchedulerBatch, logger, metrics).Run(ctx)
 		},
 	}
 }
@@ -154,6 +179,19 @@ func newWorkerCommand() *cobra.Command {
 			logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			serviceName := serviceNameOrDefault(cfg, "pulsequeue-worker")
+			shutdownTracing, err := observability.InitTracing(ctx, observability.TracingConfig{
+				ServiceName: serviceName,
+				Endpoint:    cfg.OTLPEndpoint,
+			})
+			if err != nil {
+				return err
+			}
+			defer shutdownTracingWithTimeout(shutdownTracing)
+			metrics := observability.NewMetrics(serviceName)
+			if err := observability.ServeMetrics(ctx, cfg.MetricsAddr, metrics.Handler(), logger); err != nil {
+				return err
+			}
 			store, err := storage.Open(ctx, cfg.DatabaseURL)
 			if err != nil {
 				return err
@@ -167,7 +205,7 @@ func newWorkerCommand() *cobra.Command {
 			return worker.New(store, natsClient, queue, cfg.WorkerID, concurrency, cfg.LeaseDuration, cfg.PollInterval, cfg.WorkerHeartbeat, storage.RetryPolicy{
 				InitialDelay: cfg.RetryInitialDelay,
 				MaxDelay:     cfg.RetryMaxDelay,
-			}, logger).Run(ctx)
+			}, logger, metrics).Run(ctx)
 		},
 	}
 	cmd.Flags().StringVar(&queue, "queue", "default", "queue to process")
@@ -780,6 +818,22 @@ func printJSON(value any) error {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(value)
+}
+
+func serviceNameOrDefault(cfg config.Config, fallback string) string {
+	if cfg.ServiceName != "" {
+		return cfg.ServiceName
+	}
+	return fallback
+}
+
+func shutdownTracingWithTimeout(shutdown func(context.Context) error) {
+	if shutdown == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = shutdown(ctx)
 }
 
 func fileExists(path string) bool {

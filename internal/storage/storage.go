@@ -40,7 +40,8 @@ const (
 const jobSelectColumns = `
 	id, queue, type, payload, status, priority, max_attempts, attempt_count,
 	idempotency_key, locked_by, locked_until, lease_token, timeout_seconds,
-	available_at, dead_lettered_at, created_at, updated_at, completed_at, last_error
+	traceparent, tracestate, available_at, dead_lettered_at, created_at, updated_at,
+	completed_at, last_error
 `
 
 const jobAttemptSelectColumns = `
@@ -94,6 +95,8 @@ type Job struct {
 	LockedUntil    *time.Time      `json:"locked_until,omitempty"`
 	LeaseToken     *uuid.UUID      `json:"lease_token,omitempty"`
 	TimeoutSeconds *int32          `json:"timeout_seconds,omitempty"`
+	TraceParent    *string         `json:"traceparent,omitempty"`
+	TraceState     *string         `json:"tracestate,omitempty"`
 	AvailableAt    time.Time       `json:"available_at"`
 	DeadLetteredAt *time.Time      `json:"dead_lettered_at,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
@@ -187,6 +190,29 @@ type QueueSummary struct {
 	OldestAvailableAt *time.Time `json:"oldest_available_at,omitempty"`
 }
 
+type TraceContext struct {
+	TraceParent string
+	TraceState  string
+}
+
+type JobStatusMetric struct {
+	Queue  string
+	Status string
+	Count  int64
+}
+
+type QueueMetric struct {
+	Queue string
+	Value int64
+}
+
+type ObservabilitySnapshot struct {
+	JobsByStatus  []JobStatusMetric
+	QueueDepth    []QueueMetric
+	ActiveJobs    []QueueMetric
+	ActiveWorkers []QueueMetric
+}
+
 type RetryPolicy struct {
 	InitialDelay time.Duration
 	MaxDelay     time.Duration
@@ -201,6 +227,8 @@ type CreateJobParams struct {
 	TimeoutSeconds int32
 	DelaySeconds   int32
 	IdempotencyKey *string
+	TraceParent    string
+	TraceState     string
 }
 
 type RegisterWorkerParams struct {
@@ -330,11 +358,11 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (Job, bool, er
 	}
 
 	job, err := scanJob(s.pool.QueryRow(ctx, fmt.Sprintf(`
-		INSERT INTO jobs (queue, type, payload, status, priority, max_attempts, timeout_seconds, idempotency_key, available_at)
-		VALUES ($1, $2, $3, 'queued', $4, $5, NULLIF($6, 0), NULLIF($7, ''), now() + $8::interval)
+		INSERT INTO jobs (queue, type, payload, status, priority, max_attempts, timeout_seconds, idempotency_key, traceparent, tracestate, available_at)
+		VALUES ($1, $2, $3, 'queued', $4, $5, NULLIF($6, 0), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), now() + $10::interval)
 		ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 		RETURNING %s
-	`, jobSelectColumns), p.Queue, p.Type, p.Payload, p.Priority, p.MaxAttempts, p.TimeoutSeconds, nullableStringValue(p.IdempotencyKey), intervalLiteral(time.Duration(p.DelaySeconds)*time.Second)))
+	`, jobSelectColumns), p.Queue, p.Type, p.Payload, p.Priority, p.MaxAttempts, p.TimeoutSeconds, nullableStringValue(p.IdempotencyKey), p.TraceParent, p.TraceState, intervalLiteral(time.Duration(p.DelaySeconds)*time.Second)))
 	if err == nil {
 		return job, false, nil
 	}
@@ -612,6 +640,86 @@ func (s *Store) ListQueues(ctx context.Context) ([]QueueSummary, error) {
 	return queues, rows.Err()
 }
 
+func (s *Store) ObservabilitySnapshot(ctx context.Context) (ObservabilitySnapshot, error) {
+	statusRows, err := s.pool.Query(ctx, `
+		SELECT queue, status, count(*)
+		FROM jobs
+		GROUP BY queue, status
+		ORDER BY queue ASC, status ASC
+	`)
+	if err != nil {
+		return ObservabilitySnapshot{}, err
+	}
+	defer statusRows.Close()
+
+	var snapshot ObservabilitySnapshot
+	for statusRows.Next() {
+		var metric JobStatusMetric
+		if err := statusRows.Scan(&metric.Queue, &metric.Status, &metric.Count); err != nil {
+			return ObservabilitySnapshot{}, err
+		}
+		snapshot.JobsByStatus = append(snapshot.JobsByStatus, metric)
+	}
+	if err := statusRows.Err(); err != nil {
+		return ObservabilitySnapshot{}, err
+	}
+
+	queueDepth, err := s.queryQueueMetrics(ctx, `
+		SELECT queue, count(*)
+		FROM jobs
+		WHERE status IN ('queued', 'retry_scheduled')
+		GROUP BY queue
+		ORDER BY queue ASC
+	`)
+	if err != nil {
+		return ObservabilitySnapshot{}, err
+	}
+	activeJobs, err := s.queryQueueMetrics(ctx, `
+		SELECT queue, count(*)
+		FROM jobs
+		WHERE status = 'running'
+		GROUP BY queue
+		ORDER BY queue ASC
+	`)
+	if err != nil {
+		return ObservabilitySnapshot{}, err
+	}
+	activeWorkers, err := s.queryQueueMetrics(ctx, `
+		SELECT queue, count(*)
+		FROM workers
+		CROSS JOIN LATERAL unnest(queues) AS queue
+		WHERE status = 'running'
+		GROUP BY queue
+		ORDER BY queue ASC
+	`)
+	if err != nil {
+		return ObservabilitySnapshot{}, err
+	}
+
+	snapshot.QueueDepth = queueDepth
+	snapshot.ActiveJobs = activeJobs
+	snapshot.ActiveWorkers = activeWorkers
+	return snapshot, nil
+}
+
+func (s *Store) queryQueueMetrics(ctx context.Context, query string) ([]QueueMetric, error) {
+	rows, err := s.pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var metrics []QueueMetric
+	for rows.Next() {
+		var metric QueueMetric
+		if err := rows.Scan(&metric.Queue, &metric.Value); err != nil {
+			return nil, err
+		}
+		metrics = append(metrics, metric)
+	}
+	return metrics, rows.Err()
+}
+
 func (s *Store) CreateCronJob(ctx context.Context, p CreateCronJobParams) (CronJob, error) {
 	p.Name = strings.TrimSpace(p.Name)
 	p.Queue = strings.TrimSpace(p.Queue)
@@ -714,12 +822,16 @@ func (s *Store) SetCronJobEnabled(ctx context.Context, ref string, enabled bool)
 	return updated, nil
 }
 
-func (s *Store) FireDueCronJobs(ctx context.Context, schedulerID string, batch int32) ([]CronFire, error) {
+func (s *Store) FireDueCronJobs(ctx context.Context, schedulerID string, batch int32, traceContexts ...TraceContext) ([]CronFire, error) {
 	if strings.TrimSpace(schedulerID) == "" {
 		schedulerID = "scheduler-unknown"
 	}
 	if batch <= 0 || batch > 100 {
 		batch = 50
+	}
+	traceContext := TraceContext{}
+	if len(traceContexts) > 0 {
+		traceContext = traceContexts[0]
 	}
 	now := time.Now().UTC()
 
@@ -763,12 +875,12 @@ func (s *Store) FireDueCronJobs(ctx context.Context, schedulerID string, batch i
 		idempotencyKey := cronIdempotencyKey(cronJob.ID, scheduledFor)
 
 		job, err := scanJob(tx.QueryRow(ctx, fmt.Sprintf(`
-			INSERT INTO jobs (queue, type, payload, status, priority, max_attempts, timeout_seconds, idempotency_key, available_at)
-			VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, now())
+			INSERT INTO jobs (queue, type, payload, status, priority, max_attempts, timeout_seconds, idempotency_key, traceparent, tracestate, available_at)
+			VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, NULLIF($8, ''), NULLIF($9, ''), now())
 			ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE
 			SET updated_at = jobs.updated_at
 			RETURNING %s
-		`, jobSelectColumns), cronJob.Queue, cronJob.Type, cronJob.Payload, cronJob.Priority, cronJob.MaxAttempts, cronJob.TimeoutSeconds, idempotencyKey))
+		`, jobSelectColumns), cronJob.Queue, cronJob.Type, cronJob.Payload, cronJob.Priority, cronJob.MaxAttempts, cronJob.TimeoutSeconds, idempotencyKey, traceContext.TraceParent, traceContext.TraceState))
 		if err != nil {
 			return nil, err
 		}
@@ -1305,6 +1417,8 @@ func scanJob(row scanner) (Job, error) {
 		&job.LockedUntil,
 		&job.LeaseToken,
 		&job.TimeoutSeconds,
+		&job.TraceParent,
+		&job.TraceState,
 		&job.AvailableAt,
 		&job.DeadLetteredAt,
 		&job.CreatedAt,

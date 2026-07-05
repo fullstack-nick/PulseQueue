@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: pulsequeue-api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - api:8080
+
+  - job_name: pulsequeue-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - worker:2112
+
+  - job_name: pulsequeue-scheduler
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - scheduler:2112

@@ -26,6 +26,9 @@ type Config struct {
 	SchedulerBatch    int32
 	RetryInitialDelay time.Duration
 	RetryMaxDelay     time.Duration
+	MetricsAddr       string
+	OTLPEndpoint      string
+	ServiceName       string
 }
 
 func Load() Config {
@@ -46,6 +49,9 @@ func Load() Config {
 		SchedulerBatch:    int32(getIntEnv("PULSEQUEUE_SCHEDULER_BATCH_SIZE", 50)),
 		RetryInitialDelay: getDurationEnv("PULSEQUEUE_RETRY_INITIAL_DELAY", 2*time.Second),
 		RetryMaxDelay:     getDurationEnv("PULSEQUEUE_RETRY_MAX_DELAY", 30*time.Second),
+		MetricsAddr:       os.Getenv("PULSEQUEUE_METRICS_ADDR"),
+		OTLPEndpoint:      os.Getenv("PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT"),
+		ServiceName:       os.Getenv("PULSEQUEUE_SERVICE_NAME"),
 	}
 }
 

@@ -41,6 +41,14 @@ Phase 4 adds command-line operations and cron/log visibility:
 - Queue summaries, manual retry, and queued-job cancellation
 - Expanded Cobra CLI for cron, queues, logs, retry, and cancel
 
+Phase 5 adds observability and failure-demo proof:
+
+- Prometheus metrics on API, worker, and scheduler paths
+- Grafana dashboard provisioned through Docker Compose
+- OpenTelemetry traces exported to a lightweight collector
+- Free-tier-safe k6 smoke load test
+- Failure-mode runbooks for worker crash, dead-letter, duplicate submission, and graceful shutdown demos
+
 ## Quickstart
 
 Create a local env file:
@@ -110,6 +118,23 @@ go run ./cmd/pulsequeue jobs cancel QUEUED_JOB_ID
 go run ./cmd/pulsequeue jobs retry DEAD_LETTER_OR_CANCELLED_JOB_ID
 ```
 
+Exercise Phase 5 observability locally:
+
+```powershell
+$env:PULSEQUEUE_WORKER_METRICS_ADDR=":2112"
+$env:PULSEQUEUE_SCHEDULER_METRICS_ADDR=":2112"
+$env:PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT="otel-collector:4317"
+docker compose -f deployments/docker-compose.yml --profile observability up --build
+```
+
+Then open:
+
+```text
+Grafana:    http://localhost:13000
+Prometheus: http://localhost:19090
+API metrics: http://localhost:8080/metrics
+```
+
 ## API
 
 Unauthenticated:
@@ -117,6 +142,7 @@ Unauthenticated:
 ```text
 GET /health/live
 GET /health/ready
+GET /metrics
 ```
 
 Authenticated with `Authorization: Bearer $PULSEQUEUE_OPERATOR_TOKEN`:
@@ -194,6 +220,61 @@ go run ./cmd/pulsequeue jobs submit --type demo.echo --payload '{"message":"live
 go run ./cmd/pulsequeue jobs list
 ```
 
+For Phase 5 observability proof, deploy with the observability profile:
+
+```powershell
+.\deployments\gcp\scripts\deploy.ps1 `
+  -ProjectId pulsequeue-r7m5o9ld `
+  -Zone us-central1-a `
+  -OperatorToken "replace-with-secret" `
+  -BuildImageLocally `
+  -EnableObservability `
+  -GrafanaAdminPassword "replace-with-grafana-password"
+```
+
+Open private observability tunnels:
+
+```powershell
+gcloud compute ssh pulsequeue-phase1 `
+  --project pulsequeue-r7m5o9ld `
+  --zone us-central1-a `
+  -- -L 13000:127.0.0.1:13000 -L 19090:127.0.0.1:19090
+```
+
+Then open:
+
+```text
+Grafana:    http://localhost:13000
+Prometheus: http://localhost:19090
+```
+
+Run the free-tier-safe k6 smoke:
+
+```powershell
+$env:BASE_URL="http://VM_PUBLIC_IP:8080"
+$env:TOKEN="replace-with-secret"
+k6 run load/k6/phase5-smoke.js
+```
+
+Without a local `k6` install:
+
+```powershell
+$k6Dir=(Resolve-Path load\k6).Path
+docker run --rm `
+  -v "${k6Dir}:/scripts" `
+  grafana/k6:latest run `
+  -e BASE_URL=$env:BASE_URL `
+  -e TOKEN=$env:TOKEN `
+  /scripts/phase5-smoke.js
+```
+
+Phase 5 runbooks:
+
+```text
+docs/observability.md
+docs/failure-modes.md
+```
+
 Then verify Phase 2 behavior:
 
 ```powershell
@@ -264,6 +345,53 @@ GCP firewall proof for the PulseQueue network:
 ```text
 pulsequeue-allow-operator-api  213.225.10.35/32  tcp:8080,tcp:9090
 pulsequeue-allow-operator-ssh  213.225.10.35/32  tcp:22
+```
+
+## Phase 5 Live Proof
+
+Record this section after the live observability deployment and failure demos are executed.
+
+```text
+GitHub repo: https://github.com/fullstack-nick/PulseQueue
+GitHub Actions: TODO
+GCP project: pulsequeue-r7m5o9ld
+GCP VM: pulsequeue-phase1
+Live API: TODO
+Deployment path: local image build + docker load + Docker Compose observability profile
+```
+
+Observability checks to capture:
+
+```text
+/health/live 200
+/health/ready 200
+/metrics exposes pulsequeue_* metrics
+Prometheus target pulsequeue-api up
+Prometheus target pulsequeue-worker up
+Prometheus target pulsequeue-scheduler up
+Grafana PulseQueue Overview dashboard loads through SSH tunnel
+otel-collector logs include API, scheduler, and worker spans
+```
+
+k6 benchmark result:
+
+```text
+VUs: TODO
+Duration: TODO
+Checks: TODO
+HTTP failed: TODO
+HTTP p95: TODO
+Jobs submitted: TODO
+Final queue depth: TODO
+```
+
+Failure-mode evidence:
+
+```text
+Worker crash recovery: TODO
+Repeated failure/dead-letter/manual retry: TODO
+Duplicate submission: TODO
+Graceful shutdown: TODO
 ```
 
 Container exposure on the VM:

@@ -4,7 +4,10 @@ param(
   [string]$Instance = "pulsequeue-phase1",
   [Parameter(Mandatory = $true)][string]$OperatorToken,
   [string]$PostgresPassword = "pulsequeue",
-  [switch]$BuildImageLocally
+  [switch]$BuildImageLocally,
+  [switch]$EnableObservability,
+  [string]$GrafanaAdminUser = "admin",
+  [string]$GrafanaAdminPassword = "pulsequeue"
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +40,15 @@ if ($BuildImageLocally) {
   gcloud compute scp $imageArchive "${Instance}:/tmp/pulsequeue-images.tar" --project $ProjectId --zone $Zone
 }
 
+$workerMetricsAddr = ""
+$schedulerMetricsAddr = ""
+$otelEndpoint = ""
+if ($EnableObservability) {
+  $workerMetricsAddr = ":2112"
+  $schedulerMetricsAddr = ":2112"
+  $otelEndpoint = "otel-collector:4317"
+}
+
 $envContent = @"
 POSTGRES_USER=pulsequeue
 POSTGRES_PASSWORD=$PostgresPassword
@@ -54,14 +66,24 @@ PULSEQUEUE_SCHEDULER_INTERVAL=2s
 PULSEQUEUE_SCHEDULER_BATCH_SIZE=50
 PULSEQUEUE_RETRY_INITIAL_DELAY=2s
 PULSEQUEUE_RETRY_MAX_DELAY=30s
+PULSEQUEUE_WORKER_METRICS_ADDR=$workerMetricsAddr
+PULSEQUEUE_SCHEDULER_METRICS_ADDR=$schedulerMetricsAddr
+PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT=$otelEndpoint
+GRAFANA_ADMIN_USER=$GrafanaAdminUser
+GRAFANA_ADMIN_PASSWORD=$GrafanaAdminPassword
 "@
 $envFile = Join-Path $env:TEMP "pulsequeue.env"
 Set-Content -LiteralPath $envFile -Value $envContent -NoNewline
 gcloud compute scp $envFile "${Instance}:$remote/.env" --project $ProjectId --zone $Zone
 
-$composeUp = "docker compose -f deployments/docker-compose.yml --env-file .env up -d --build"
+$profileArg = ""
+if ($EnableObservability) {
+  $profileArg = "--profile observability "
+}
+
+$composeUp = "docker compose -f deployments/docker-compose.yml --env-file .env $profileArg up -d --build"
 if ($BuildImageLocally) {
-  $composeUp = "docker load -i /tmp/pulsequeue-images.tar && docker compose -f deployments/docker-compose.yml --env-file .env up -d --no-build --force-recreate"
+  $composeUp = "docker load -i /tmp/pulsequeue-images.tar && docker compose -f deployments/docker-compose.yml --env-file .env $profileArg up -d --no-build --force-recreate"
 }
 
 gcloud compute ssh $Instance --project $ProjectId --zone $Zone --command "cd $remote && rm -rf app && mkdir app && tar -xf /tmp/pulsequeue-deploy.tar -C app && cp .env app/.env && cd app && $composeUp"

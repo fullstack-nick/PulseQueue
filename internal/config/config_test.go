@@ -13,6 +13,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PULSEQUEUE_WORKER_HEARTBEAT_INTERVAL", "")
 	t.Setenv("PULSEQUEUE_SCHEDULER_INTERVAL", "")
 	t.Setenv("PULSEQUEUE_SCHEDULER_BATCH_SIZE", "")
+	t.Setenv("PULSEQUEUE_METRICS_ADDR", "")
+	t.Setenv("PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("PULSEQUEUE_SERVICE_NAME", "")
 
 	cfg := Load()
 	if cfg.HTTPAddr != ":8080" {
@@ -41,6 +44,15 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.RetryMaxDelay.String() != "30s" {
 		t.Fatalf("unexpected RetryMaxDelay: %s", cfg.RetryMaxDelay)
+	}
+	if cfg.MetricsAddr != "" {
+		t.Fatalf("unexpected MetricsAddr: %s", cfg.MetricsAddr)
+	}
+	if cfg.OTLPEndpoint != "" {
+		t.Fatalf("unexpected OTLPEndpoint: %s", cfg.OTLPEndpoint)
+	}
+	if cfg.ServiceName != "" {
+		t.Fatalf("unexpected ServiceName: %s", cfg.ServiceName)
 	}
 }
 
@@ -79,5 +91,22 @@ func TestLoadSchedulerConfig(t *testing.T) {
 	}
 	if cfg.WorkerHeartbeat.String() != "4s" {
 		t.Fatalf("unexpected WorkerHeartbeat: %s", cfg.WorkerHeartbeat)
+	}
+}
+
+func TestLoadObservabilityConfig(t *testing.T) {
+	t.Setenv("PULSEQUEUE_METRICS_ADDR", ":2112")
+	t.Setenv("PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
+	t.Setenv("PULSEQUEUE_SERVICE_NAME", "pulsequeue-worker")
+
+	cfg := Load()
+	if cfg.MetricsAddr != ":2112" {
+		t.Fatalf("unexpected MetricsAddr: %s", cfg.MetricsAddr)
+	}
+	if cfg.OTLPEndpoint != "otel-collector:4317" {
+		t.Fatalf("unexpected OTLPEndpoint: %s", cfg.OTLPEndpoint)
+	}
+	if cfg.ServiceName != "pulsequeue-worker" {
+		t.Fatalf("unexpected ServiceName: %s", cfg.ServiceName)
 	}
 }

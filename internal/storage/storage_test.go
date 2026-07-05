@@ -601,6 +601,82 @@ func TestPhase4ConcurrentCronFireCreatesOneRun(t *testing.T) {
 	}
 }
 
+func TestCreateJobPersistsTraceContext(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	const traceParent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	const traceState = "vendor=value"
+	job := createTestJob(t, store, CreateJobParams{
+		Queue:       "default",
+		Type:        "demo.echo",
+		Payload:     json.RawMessage(`{"message":"traced"}`),
+		MaxAttempts: 1,
+		TraceParent: traceParent,
+		TraceState:  traceState,
+	})
+
+	stored, err := store.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.TraceParent == nil || *stored.TraceParent != traceParent {
+		t.Fatalf("traceparent = %v, want %q", stored.TraceParent, traceParent)
+	}
+	if stored.TraceState == nil || *stored.TraceState != traceState {
+		t.Fatalf("tracestate = %v, want %q", stored.TraceState, traceState)
+	}
+}
+
+func TestObservabilitySnapshotCountsQueues(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	createTestJob(t, store, CreateJobParams{
+		Queue:       "default",
+		Type:        "demo.echo",
+		Payload:     json.RawMessage(`{"message":"queued"}`),
+		MaxAttempts: 1,
+	})
+	running := createTestJob(t, store, CreateJobParams{
+		Queue:       "critical",
+		Type:        "demo.sleep",
+		Payload:     json.RawMessage(`{"duration_ms":1000}`),
+		MaxAttempts: 1,
+	})
+	if _, ok, err := store.ClaimJob(ctx, "critical", "worker-critical", time.Minute); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Fatal("expected critical job claim")
+	}
+	if _, err := store.RegisterWorker(ctx, RegisterWorkerParams{
+		ID:          "worker-default",
+		Hostname:    "host",
+		Queues:      []string{"default"},
+		Concurrency: 1,
+		Metadata:    json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.ObservabilitySnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findQueueMetric(snapshot.QueueDepth, "default"); got != 1 {
+		t.Fatalf("default queue depth = %d, want 1", got)
+	}
+	if got := findQueueMetric(snapshot.ActiveJobs, "critical"); got != 1 {
+		t.Fatalf("critical active jobs = %d, want 1 for %s", got, running.ID)
+	}
+	if got := findQueueMetric(snapshot.ActiveWorkers, "default"); got != 1 {
+		t.Fatalf("default active workers = %d, want 1", got)
+	}
+	if got := findStatusMetric(snapshot.JobsByStatus, "critical", StatusRunning); got != 1 {
+		t.Fatalf("critical running jobs = %d, want 1", got)
+	}
+}
+
 func TestConcurrentIdempotencyKeySubmissionCreatesOneJob(t *testing.T) {
 	store := openIntegrationStore(t)
 	ctx := context.Background()
@@ -691,4 +767,22 @@ func createTestJob(t *testing.T, store *Store, params CreateJobParams) Job {
 
 func stringPtr(value string) *string {
 	return &value
+}
+
+func findQueueMetric(metrics []QueueMetric, queue string) int64 {
+	for _, metric := range metrics {
+		if metric.Queue == queue {
+			return metric.Value
+		}
+	}
+	return 0
+}
+
+func findStatusMetric(metrics []JobStatusMetric, queue, status string) int64 {
+	for _, metric := range metrics {
+		if metric.Queue == queue && metric.Status == status {
+			return metric.Count
+		}
+	}
+	return 0
 }

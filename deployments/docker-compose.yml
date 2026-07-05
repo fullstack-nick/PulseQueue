@@ -8,7 +8,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql
     ports:
-      - "127.0.0.1:5432:5432"
+      - "${POSTGRES_PUBLIC_BIND:-127.0.0.1}:${POSTGRES_PUBLIC_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pulsequeue} -d ${POSTGRES_DB:-pulsequeue}"]
       interval: 5s
@@ -36,6 +36,8 @@ services:
       PULSEQUEUE_GRPC_ADDR: ":9090"
       PULSEQUEUE_DATABASE_URL: postgres://${POSTGRES_USER:-pulsequeue}:${POSTGRES_PASSWORD:-pulsequeue}@postgres:5432/${POSTGRES_DB:-pulsequeue}?sslmode=disable
       PULSEQUEUE_NATS_URL: nats://nats:4222
+      PULSEQUEUE_SERVICE_NAME: pulsequeue-api
+      PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT: ${PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "${PULSEQUEUE_PUBLIC_HTTP_BIND:-127.0.0.1}:8080:8080"
       - "${PULSEQUEUE_PUBLIC_GRPC_BIND:-127.0.0.1}:9090:9090"
@@ -61,6 +63,9 @@ services:
       PULSEQUEUE_DATABASE_URL: postgres://${POSTGRES_USER:-pulsequeue}:${POSTGRES_PASSWORD:-pulsequeue}@postgres:5432/${POSTGRES_DB:-pulsequeue}?sslmode=disable
       PULSEQUEUE_NATS_URL: nats://nats:4222
       PULSEQUEUE_WORKER_ID: ${PULSEQUEUE_WORKER_ID:-}
+      PULSEQUEUE_SERVICE_NAME: pulsequeue-worker
+      PULSEQUEUE_METRICS_ADDR: ${PULSEQUEUE_WORKER_METRICS_ADDR:-:2112}
+      PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT: ${PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       api:
         condition: service_healthy
@@ -76,10 +81,56 @@ services:
       PULSEQUEUE_DATABASE_URL: postgres://${POSTGRES_USER:-pulsequeue}:${POSTGRES_PASSWORD:-pulsequeue}@postgres:5432/${POSTGRES_DB:-pulsequeue}?sslmode=disable
       PULSEQUEUE_NATS_URL: nats://nats:4222
       PULSEQUEUE_SCHEDULER_ID: ${PULSEQUEUE_SCHEDULER_ID:-}
+      PULSEQUEUE_SERVICE_NAME: pulsequeue-scheduler
+      PULSEQUEUE_METRICS_ADDR: ${PULSEQUEUE_SCHEDULER_METRICS_ADDR:-:2112}
+      PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT: ${PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       api:
         condition: service_healthy
 
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=6h"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:19090:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_started
+      scheduler:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-pulsequeue}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:13000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol/config.yml:ro
+
 volumes:
   postgres-data:
   nats-data:
+  grafana-data:

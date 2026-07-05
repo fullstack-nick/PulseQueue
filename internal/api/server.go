@@ -12,7 +12,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/fullstack-nick/PulseQueue/internal/observability"
 	"github.com/fullstack-nick/PulseQueue/internal/signals"
 	"github.com/fullstack-nick/PulseQueue/internal/storage"
 )
@@ -22,6 +26,8 @@ type Server struct {
 	signals       *signals.Client
 	operatorToken string
 	logger        *slog.Logger
+	metrics       *observability.Metrics
+	tracer        trace.Tracer
 }
 
 type CreateJobRequest struct {
@@ -51,16 +57,30 @@ type CreateCronJobRequest struct {
 	TimeoutSeconds int32           `json:"timeout_seconds"`
 }
 
-func NewServer(store *storage.Store, signals *signals.Client, operatorToken string, logger *slog.Logger) http.Handler {
-	s := &Server{store: store, signals: signals, operatorToken: operatorToken, logger: logger}
+func NewServer(store *storage.Store, signals *signals.Client, operatorToken string, logger *slog.Logger, metrics *observability.Metrics) http.Handler {
+	if metrics == nil {
+		metrics = observability.NewMetrics("pulsequeue-api")
+	}
+	s := &Server{
+		store:         store,
+		signals:       signals,
+		operatorToken: operatorToken,
+		logger:        logger,
+		metrics:       metrics,
+		tracer:        observability.Tracer("github.com/fullstack-nick/PulseQueue/internal/api"),
+	}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	r.Use(s.observabilityMiddleware)
 	r.Use(s.loggingMiddleware)
 
 	r.Get("/health/live", s.handleLive)
 	r.Get("/health/ready", s.handleReady)
+	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		s.metrics.Handler().ServeHTTP(w, r)
+	})
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAuth)
@@ -101,6 +121,9 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
+	ctx, span := s.tracer.Start(r.Context(), "api.create_job")
+	defer span.End()
+
 	var req CreateJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -121,7 +144,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		trimmed := strings.TrimSpace(req.IdempotencyKey)
 		key = &trimmed
 	}
-	job, existing, err := s.store.CreateJob(r.Context(), storage.CreateJobParams{
+	traceContext := observability.InjectTraceContext(ctx)
+	job, existing, err := s.store.CreateJob(ctx, storage.CreateJobParams{
 		Queue:          req.Queue,
 		Type:           req.Type,
 		Payload:        req.Payload,
@@ -130,27 +154,41 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds: req.TimeoutSeconds,
 		DelaySeconds:   req.DelaySeconds,
 		IdempotencyKey: key,
+		TraceParent:    traceContext.TraceParent,
+		TraceState:     traceContext.TraceState,
 	})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	span.SetAttributes(
+		attribute.String("job.id", job.ID.String()),
+		attribute.String("job.queue", job.Queue),
+		attribute.String("job.type", job.Type),
+		attribute.Bool("job.existing", existing),
+	)
+	s.metrics.RecordJobSubmitted(job.Queue, job.Type, existing)
 	if !existing && req.DelaySeconds == 0 {
 		if err := s.signals.PublishJobAvailable(job.Queue); err != nil {
+			s.metrics.RecordNATSPublishFailure("api", job.Queue)
 			s.logger.Warn("job persisted but nats publish failed", "job_id", job.ID, "error", err)
 		}
 	}
 	if !existing {
-		if _, err := s.store.AppendJobLog(r.Context(), storage.AppendJobLogParams{
+		fields := map[string]any{
+			"request_id": middleware.GetReqID(ctx),
+			"queue":      job.Queue,
+			"job_type":   job.Type,
+			"source":     "api",
+		}
+		addTraceFields(ctx, fields)
+		if _, err := s.store.AppendJobLog(ctx, storage.AppendJobLogParams{
 			JobID:   job.ID,
 			Level:   "info",
 			Message: "job submitted",
-			Fields: logFields(map[string]any{
-				"request_id": middleware.GetReqID(r.Context()),
-				"queue":      job.Queue,
-				"job_type":   job.Type,
-				"source":     "api",
-			}),
+			Fields:  logFields(fields),
 		}); err != nil {
 			s.logger.Warn("job submitted but log append failed", "job_id", job.ID, "error", err)
 		}
@@ -252,17 +290,29 @@ func (s *Server) handleListJobLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
+	ctx, span := s.tracer.Start(r.Context(), "api.retry_job")
+	defer span.End()
+
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid job id")
 		return
 	}
-	job, err := s.store.RetryJob(r.Context(), id)
+	job, err := s.store.RetryJob(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		writeStorageError(w, err, "failed to retry job")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("job.id", job.ID.String()),
+		attribute.String("job.queue", job.Queue),
+		attribute.String("job.type", job.Type),
+	)
+	s.metrics.RecordJobRetried(job)
 	if err := s.signals.PublishJobAvailable(job.Queue); err != nil {
+		s.metrics.RecordNATSPublishFailure("api", job.Queue)
 		s.logger.Warn("job retried but nats publish failed", "job_id", job.ID, "queue", job.Queue, "error", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
@@ -368,14 +418,53 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r)
-		s.logger.Info("http request",
+		fields := []any{
 			"request_id", middleware.GetReqID(r.Context()),
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", ww.Status(),
 			"duration_ms", time.Since(start).Milliseconds(),
-		)
+		}
+		fields = append(fields, observability.TraceLogFields(r.Context())...)
+		s.logger.Info("http request", fields...)
 	})
+}
+
+func (s *Server) observabilityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, span := s.tracer.Start(r.Context(), "http "+r.Method)
+		defer span.End()
+
+		start := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		req := r.WithContext(ctx)
+		next.ServeHTTP(ww, req)
+
+		status := ww.Status()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		route := routePattern(req)
+		duration := time.Since(start)
+		s.metrics.RecordHTTPRequest(r.Method, route, status, duration)
+		span.SetAttributes(
+			attribute.String("http.method", r.Method),
+			attribute.String("http.route", route),
+			attribute.Int("http.status_code", status),
+		)
+		if status >= http.StatusInternalServerError {
+			span.SetStatus(codes.Error, http.StatusText(status))
+		}
+	})
+}
+
+func routePattern(r *http.Request) string {
+	if routeContext := chi.RouteContext(r.Context()); routeContext != nil {
+		if pattern := routeContext.RoutePattern(); pattern != "" {
+			return pattern
+		}
+	}
+	return r.URL.Path
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -405,4 +494,15 @@ func logFields(value any) json.RawMessage {
 		return json.RawMessage(`{}`)
 	}
 	return raw
+}
+
+func addTraceFields(ctx context.Context, fields map[string]any) {
+	traceFields := observability.TraceLogFields(ctx)
+	for i := 0; i+1 < len(traceFields); i += 2 {
+		key, ok := traceFields[i].(string)
+		if !ok {
+			continue
+		}
+		fields[key] = traceFields[i+1]
+	}
 }

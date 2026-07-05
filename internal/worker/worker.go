@@ -11,6 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/fullstack-nick/PulseQueue/internal/observability"
 	"github.com/fullstack-nick/PulseQueue/internal/signals"
 	"github.com/fullstack-nick/PulseQueue/internal/storage"
 )
@@ -26,9 +31,11 @@ type Runner struct {
 	heartbeatInterval time.Duration
 	retryPolicy       storage.RetryPolicy
 	logger            *slog.Logger
+	metrics           *observability.Metrics
+	tracer            trace.Tracer
 }
 
-func New(store *storage.Store, signals *signals.Client, queue, workerID string, concurrency int, leaseDuration, pollInterval, heartbeatInterval time.Duration, retryPolicy storage.RetryPolicy, logger *slog.Logger) *Runner {
+func New(store *storage.Store, signals *signals.Client, queue, workerID string, concurrency int, leaseDuration, pollInterval, heartbeatInterval time.Duration, retryPolicy storage.RetryPolicy, logger *slog.Logger, metrics *observability.Metrics) *Runner {
 	if queue == "" {
 		queue = "default"
 	}
@@ -41,6 +48,9 @@ func New(store *storage.Store, signals *signals.Client, queue, workerID string, 
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if metrics == nil {
+		metrics = observability.NewMetrics("pulsequeue-worker")
+	}
 	return &Runner{
 		store:             store,
 		signals:           signals,
@@ -52,6 +62,8 @@ func New(store *storage.Store, signals *signals.Client, queue, workerID string, 
 		heartbeatInterval: heartbeatInterval,
 		retryPolicy:       retryPolicy.Normalize(),
 		logger:            logger,
+		metrics:           metrics,
+		tracer:            observability.Tracer("github.com/fullstack-nick/PulseQueue/internal/worker"),
 	}
 }
 
@@ -130,6 +142,8 @@ func (r *Runner) heartbeat(ctx context.Context, status *atomic.Value) {
 		}
 		if err := r.store.HeartbeatWorker(ctx, r.workerID, current, r.leaseDuration); err != nil {
 			r.logger.Warn("worker heartbeat failed", "worker_id", r.workerID, "status", current, "error", err)
+		} else {
+			r.metrics.RecordWorkerHeartbeat(r.queue, current)
 		}
 
 		select {
@@ -188,10 +202,24 @@ func (r *Runner) drain(ctx context.Context, slot int) error {
 func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob, slot int) {
 	job := claimed.Job
 	attempt := claimed.Attempt
+	ctx = observability.ExtractTraceContext(ctx, observability.TraceContextFromJob(job))
+	ctx, span := r.tracer.Start(ctx, "worker.execute_job")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("job.id", job.ID.String()),
+		attribute.String("job.queue", job.Queue),
+		attribute.String("job.type", job.Type),
+		attribute.String("worker.id", r.workerID),
+		attribute.Int("worker.slot", slot),
+		attribute.Int("job.attempt", int(attempt.AttemptNumber)),
+	)
+
 	if job.LeaseToken == nil {
+		span.SetStatus(codes.Error, "missing lease token")
 		r.logger.Error("claimed job missing lease token", "job_id", job.ID)
 		return
 	}
+	r.metrics.RecordJobStarted(job)
 	r.logger.Info("job started",
 		"job_id", job.ID,
 		"attempt_id", attempt.ID,
@@ -202,7 +230,7 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob, slot i
 		"slot", slot,
 		"status", job.Status,
 	)
-	r.appendJobLog(context.Background(), job, attempt, "info", "job started", map[string]any{
+	r.appendJobLog(ctx, job, attempt, "info", "job started", map[string]any{
 		"slot":   slot,
 		"status": job.Status,
 	})
@@ -220,11 +248,15 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob, slot i
 		if errors.Is(err, context.DeadlineExceeded) {
 			message = "job timed out"
 		}
-		r.fail(context.Background(), claimed, message, time.Since(started), slot)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, message)
+		r.fail(ctx, claimed, message, time.Since(started), slot)
 		return
 	}
 
-	if err := r.store.CompleteJob(context.Background(), job.ID, *job.LeaseToken); err != nil {
+	if err := r.store.CompleteJob(ctx, job.ID, *job.LeaseToken); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		r.logger.Error("job completion failed",
 			"job_id", job.ID,
 			"attempt_id", attempt.ID,
@@ -239,7 +271,8 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob, slot i
 		return
 	}
 	durationMS := time.Since(started).Milliseconds()
-	r.appendJobLog(context.Background(), job, attempt, "info", "job succeeded", map[string]any{
+	r.metrics.RecordJobSucceeded(job, time.Since(started))
+	r.appendJobLog(ctx, job, attempt, "info", "job succeeded", map[string]any{
 		"slot":        slot,
 		"status":      storage.StatusSucceeded,
 		"duration_ms": durationMS,
@@ -326,6 +359,7 @@ func (r *Runner) fail(ctx context.Context, claimed storage.ClaimedJob, message s
 		)
 		return
 	}
+	r.metrics.RecordJobFailed(job, updated.Status, duration)
 	r.appendJobLog(ctx, job, attempt, "warn", "job failed", map[string]any{
 		"slot":        slot,
 		"status":      updated.Status,
@@ -355,6 +389,7 @@ func (r *Runner) appendJobLog(ctx context.Context, job storage.Job, attempt stor
 	fields["job_type"] = job.Type
 	fields["queue"] = job.Queue
 	fields["worker_id"] = r.workerID
+	addTraceFields(ctx, fields)
 	attemptID := attempt.ID
 	if _, err := r.store.AppendJobLog(ctx, storage.AppendJobLogParams{
 		JobID:     job.ID,
@@ -373,4 +408,15 @@ func mustJSON(value any) json.RawMessage {
 		return json.RawMessage(`{}`)
 	}
 	return raw
+}
+
+func addTraceFields(ctx context.Context, fields map[string]any) {
+	traceFields := observability.TraceLogFields(ctx)
+	for i := 0; i+1 < len(traceFields); i += 2 {
+		key, ok := traceFields[i].(string)
+		if !ok {
+			continue
+		}
+		fields[key] = traceFields[i+1]
+	}
 }
