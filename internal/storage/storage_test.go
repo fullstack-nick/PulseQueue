@@ -666,8 +666,14 @@ func TestObservabilitySnapshotCountsQueues(t *testing.T) {
 	if got := findQueueMetric(snapshot.QueueDepth, "default"); got != 1 {
 		t.Fatalf("default queue depth = %d, want 1", got)
 	}
+	if got := findQueueMetric(snapshot.QueueDepth, "critical"); got != 0 {
+		t.Fatalf("critical queue depth = %d, want 0", got)
+	}
 	if got := findQueueMetric(snapshot.ActiveJobs, "critical"); got != 1 {
 		t.Fatalf("critical active jobs = %d, want 1 for %s", got, running.ID)
+	}
+	if got := findQueueMetric(snapshot.ActiveJobs, "default"); got != 0 {
+		t.Fatalf("default active jobs = %d, want 0", got)
 	}
 	if got := findQueueMetric(snapshot.ActiveWorkers, "default"); got != 1 {
 		t.Fatalf("default active workers = %d, want 1", got)

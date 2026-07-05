@@ -349,58 +349,89 @@ pulsequeue-allow-operator-ssh  213.225.10.35/32  tcp:22
 
 ## Phase 5 Live Proof
 
-Record this section after the live observability deployment and failure demos are executed.
+Recorded on 2026-07-05 UTC / 2026-07-05 Europe/Berlin.
 
 ```text
 GitHub repo: https://github.com/fullstack-nick/PulseQueue
-GitHub Actions: TODO
+Implementation commit: 8abccb4c4e7644f8d4d499915597643db85176af
+GitHub Actions: ci run 28734344561 succeeded
 GCP project: pulsequeue-r7m5o9ld
 GCP VM: pulsequeue-phase1
-Live API: TODO
+GCP zone: us-central1-a
+Live API: http://35.254.165.175:8080
 Deployment path: local image build + docker load + Docker Compose observability profile
+Terraform drift check after proof: no changes
 ```
 
-Observability checks to capture:
+Live observability checks:
 
 ```text
 /health/live 200
 /health/ready 200
-/metrics exposes pulsequeue_* metrics
-Prometheus target pulsequeue-api up
-Prometheus target pulsequeue-worker up
-Prometheus target pulsequeue-scheduler up
-Grafana PulseQueue Overview dashboard loads through SSH tunnel
-otel-collector logs include API, scheduler, and worker spans
+/metrics exposes pulsequeue_* metrics without operator auth
+Prometheus ready: Prometheus Server is Ready.
+Prometheus targets: pulsequeue-api up, pulsequeue-worker up, pulsequeue-scheduler up
+Grafana health through VM loopback: database=ok, version=13.1.0
+OTel collector debug logs include pulsequeue-api, pulsequeue-scheduler, and pulsequeue-worker spans
+Queue drained proof after load/failure demos: pulsequeue_queue_depth{queue="default"} 0
+Scheduler recovery metric after crash demo: sum(pulsequeue_scheduler_recovered_jobs_total) 1
 ```
 
 k6 benchmark result:
 
 ```text
-VUs: TODO
-Duration: TODO
-Checks: TODO
-HTTP failed: TODO
-HTTP p95: TODO
-Jobs submitted: TODO
-Final queue depth: TODO
+VUs: 2
+Duration: 60s
+Iterations/jobs submitted: 42
+Checks: 295/295 succeeded
+HTTP failed: 0/211 (0.00%)
+HTTP p95: 202.99ms
+Final queue depth: 0
 ```
 
 Failure-mode evidence:
 
 ```text
-Worker crash recovery: TODO
-Repeated failure/dead-letter/manual retry: TODO
-Duplicate submission: TODO
-Graceful shutdown: TODO
+Worker crash recovery:
+  job 260c6d20-78f6-4999-9c04-70992f9507b9
+  killed worker container 5026961f36f4 during attempt 1
+  attempt 1 failed with "job lease expired" after 60,988ms
+  scheduler recovered the lease
+  worker-39f119f07317 completed attempt 2 successfully in 30,008ms
+  trace_id 988f3c060a08e845aebb7efc76fb962c links api.create_job and worker.execute_job
+
+Repeated failure/dead-letter/manual retry:
+  job 2cc80b1e-c1a7-4d30-915a-f2aebab720ba
+  demo.fail reached dead_letter after attempts 1-3
+  manual retry returned status=queued and increased max_attempts to 4
+  attempt 4 failed and job returned to dead_letter
+  traceparent 00-676668c44505f4e5704f327607cb4ecd-65ad3442e94bd6b7-01
+
+Duplicate submission:
+  idempotency key phase5-duplicate-proof-20260705104338
+  first submit created job 61f51367-56d2-4a9d-a2f3-7427b9cf42b5 with existing=false
+  second submit returned the same job ID with existing=true
+  job executed once; one succeeded attempt was recorded
+
+Graceful shutdown:
+  job 06184cc5-6ed0-4569-859b-c61db5de8d6e
+  docker stop -t 30 sent to worker-39f119f07317 while attempt 1 was active
+  job completed successfully in 10,006ms before worker stopped
+  worker registry showed worker-39f119f07317 status=stopped
 ```
 
 Container exposure on the VM:
 
 ```text
-api       0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp
-postgres 127.0.0.1:5432->5432/tcp
-nats      127.0.0.1:4222->4222/tcp, 127.0.0.1:8222->8222/tcp
-worker    no public ports
+api             0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp
+grafana         127.0.0.1:13000->3000/tcp
+prometheus      127.0.0.1:19090->9090/tcp
+postgres        127.0.0.1:5432->5432/tcp
+nats            127.0.0.1:4222->4222/tcp, 127.0.0.1:8222->8222/tcp
+otel-collector  no public ports
+worker          no public ports
+scheduler       no public ports
+firewall        tcp:8080,tcp:9090 and tcp:22 only from 213.225.10.35/32
 ```
 
 ## Phase 2 Live Proof

@@ -665,21 +665,41 @@ func (s *Store) ObservabilitySnapshot(ctx context.Context) (ObservabilitySnapsho
 	}
 
 	queueDepth, err := s.queryQueueMetrics(ctx, `
-		SELECT queue, count(*)
-		FROM jobs
-		WHERE status IN ('queued', 'retry_scheduled')
-		GROUP BY queue
-		ORDER BY queue ASC
+		WITH queues AS (
+			SELECT DISTINCT queue FROM jobs
+			UNION
+			SELECT DISTINCT unnest(queues) AS queue FROM workers
+		),
+		counts AS (
+			SELECT queue, count(*) AS value
+			FROM jobs
+			WHERE status IN ('queued', 'retry_scheduled')
+			GROUP BY queue
+		)
+		SELECT queues.queue, COALESCE(counts.value, 0)
+		FROM queues
+		LEFT JOIN counts ON counts.queue = queues.queue
+		ORDER BY queues.queue ASC
 	`)
 	if err != nil {
 		return ObservabilitySnapshot{}, err
 	}
 	activeJobs, err := s.queryQueueMetrics(ctx, `
-		SELECT queue, count(*)
-		FROM jobs
-		WHERE status = 'running'
-		GROUP BY queue
-		ORDER BY queue ASC
+		WITH queues AS (
+			SELECT DISTINCT queue FROM jobs
+			UNION
+			SELECT DISTINCT unnest(queues) AS queue FROM workers
+		),
+		counts AS (
+			SELECT queue, count(*) AS value
+			FROM jobs
+			WHERE status = 'running'
+			GROUP BY queue
+		)
+		SELECT queues.queue, COALESCE(counts.value, 0)
+		FROM queues
+		LEFT JOIN counts ON counts.queue = queues.queue
+		ORDER BY queues.queue ASC
 	`)
 	if err != nil {
 		return ObservabilitySnapshot{}, err
