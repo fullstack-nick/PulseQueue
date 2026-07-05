@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulsequeue-k3s
+  labels:
+    app.kubernetes.io/name: pulsequeue
+    app.kubernetes.io/part-of: pulsequeue
+    pulsequeue.io/runtime: k3s-proof

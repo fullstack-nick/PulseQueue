@@ -1,0 +1,23 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pulsequeue-worker
+  namespace: pulsequeue-k3s
+  labels:
+    app.kubernetes.io/name: pulsequeue-worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: pulsequeue
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pulsequeue-worker
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 75

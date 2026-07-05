@@ -1,3 +1,11 @@
+locals {
+  common_labels = {
+    app          = "pulsequeue"
+    "managed-by" = "terraform"
+    runtime      = "compose-default-k3s-proof"
+  }
+}
+
 resource "google_service_account" "pulsequeue" {
   account_id   = "pulsequeue-vm"
   display_name = "PulseQueue VM service account"
@@ -39,6 +47,7 @@ resource "google_compute_instance" "pulsequeue" {
   machine_type = var.machine_type
   zone         = var.zone
   tags         = ["pulsequeue"]
+  labels       = local.common_labels
 
   boot_disk {
     initialize_params {

@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pulsequeue-worker
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: pulsequeue-worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: pulsequeue
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pulsequeue-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pulsequeue-worker
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/part-of: pulsequeue
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - worker
+            - --queue
+            - $(PULSEQUEUE_WORKER_QUEUE)
+            - --concurrency
+            - $(PULSEQUEUE_WORKER_CONCURRENCY)
+          ports:
+            - name: metrics
+              containerPort: 2112
+          envFrom:
+            - configMapRef:
+                name: pulsequeue-config
+          env:
+            - name: PULSEQUEUE_SERVICE_NAME
+              value: pulsequeue-worker
+            - name: PULSEQUEUE_METRICS_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsequeue-config
+                  key: PULSEQUEUE_WORKER_METRICS_ADDR
+            - name: PULSEQUEUE_OPERATOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: operator-token
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: postgres-password
+            - name: PULSEQUEUE_DATABASE_URL
+              value: postgres://{{ .Values.postgres.user }}:$(POSTGRES_PASSWORD)@postgres:5432/{{ .Values.postgres.database }}?sslmode=disable
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+{{ toYaml .Values.worker.resources | indent 12 }}

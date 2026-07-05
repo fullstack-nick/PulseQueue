@@ -16,5 +16,10 @@ coverage.out
 *.test
 *.exe
 
+.kube/
+*.kubeconfig
+deployments/helm/**/charts/
+deployments/helm/**/Chart.lock
+
 .DS_Store
 Thumbs.db

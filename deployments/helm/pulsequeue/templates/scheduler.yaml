@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pulsequeue-scheduler
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: pulsequeue-scheduler
+    app.kubernetes.io/component: scheduler
+    app.kubernetes.io/part-of: pulsequeue
+spec:
+  replicas: {{ .Values.scheduler.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pulsequeue-scheduler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pulsequeue-scheduler
+        app.kubernetes.io/component: scheduler
+        app.kubernetes.io/part-of: pulsequeue
+    spec:
+      containers:
+        - name: scheduler
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["scheduler"]
+          ports:
+            - name: metrics
+              containerPort: 2112
+          envFrom:
+            - configMapRef:
+                name: pulsequeue-config
+          env:
+            - name: PULSEQUEUE_SERVICE_NAME
+              value: pulsequeue-scheduler
+            - name: PULSEQUEUE_METRICS_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: pulsequeue-config
+                  key: PULSEQUEUE_SCHEDULER_METRICS_ADDR
+            - name: PULSEQUEUE_OPERATOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: operator-token
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: postgres-password
+            - name: PULSEQUEUE_DATABASE_URL
+              value: postgres://{{ .Values.postgres.user }}:$(POSTGRES_PASSWORD)@postgres:5432/{{ .Values.postgres.database }}?sslmode=disable
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+{{ toYaml .Values.scheduler.resources | indent 12 }}

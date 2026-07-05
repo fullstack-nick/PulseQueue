@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pulsequeue-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: pulsequeue
+    app.kubernetes.io/part-of: pulsequeue
+data:
+  PULSEQUEUE_HTTP_ADDR: {{ .Values.config.httpAddr | quote }}
+  PULSEQUEUE_GRPC_ADDR: {{ .Values.config.grpcAddr | quote }}
+  PULSEQUEUE_API_URL: {{ .Values.config.apiUrl | quote }}
+  PULSEQUEUE_NATS_URL: "nats://nats:4222"
+  PULSEQUEUE_WORKER_QUEUE: {{ .Values.config.workerQueue | quote }}
+  PULSEQUEUE_WORKER_CONCURRENCY: {{ .Values.config.workerConcurrency | quote }}
+  PULSEQUEUE_WORKER_POLL_INTERVAL: {{ .Values.config.workerPollInterval | quote }}
+  PULSEQUEUE_WORKER_HEARTBEAT_INTERVAL: {{ .Values.config.workerHeartbeatInterval | quote }}
+  PULSEQUEUE_LEASE_DURATION: {{ .Values.config.leaseDuration | quote }}
+  PULSEQUEUE_SCHEDULER_INTERVAL: {{ .Values.config.schedulerInterval | quote }}
+  PULSEQUEUE_SCHEDULER_BATCH_SIZE: {{ .Values.config.schedulerBatchSize | quote }}
+  PULSEQUEUE_RETRY_INITIAL_DELAY: {{ .Values.config.retryInitialDelay | quote }}
+  PULSEQUEUE_RETRY_MAX_DELAY: {{ .Values.config.retryMaxDelay | quote }}
+  PULSEQUEUE_WORKER_METRICS_ADDR: {{ .Values.worker.metricsAddr | quote }}
+  PULSEQUEUE_SCHEDULER_METRICS_ADDR: {{ .Values.scheduler.metricsAddr | quote }}
+  PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otlpEndpoint | quote }}

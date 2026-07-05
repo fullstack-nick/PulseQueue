@@ -1,0 +1,85 @@
+namespace: pulsequeue-k3s
+
+image:
+  repository: ghcr.io/fullstack-nick/pulsequeue
+  tag: main
+  pullPolicy: IfNotPresent
+
+secrets:
+  existingSecret: pulsequeue-secrets
+
+config:
+  httpAddr: ":8080"
+  grpcAddr: ":9090"
+  apiUrl: "http://pulsequeue-api:8080"
+  workerQueue: default
+  workerConcurrency: "1"
+  workerPollInterval: 5s
+  workerHeartbeatInterval: 10s
+  leaseDuration: 60s
+  schedulerInterval: 2s
+  schedulerBatchSize: "50"
+  retryInitialDelay: 2s
+  retryMaxDelay: 30s
+  otlpEndpoint: ""
+
+postgres:
+  image: postgres:18
+  user: pulsequeue
+  database: pulsequeue
+  storage: 1Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 384Mi
+
+nats:
+  image: nats:2.12
+  storage: 512Mi
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+api:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+worker:
+  replicas: 1
+  metricsAddr: ":2112"
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 2
+    targetCPUUtilizationPercentage: 75
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+scheduler:
+  replicas: 1
+  metricsAddr: ":2112"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi

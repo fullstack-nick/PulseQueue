@@ -49,6 +49,14 @@ Phase 5 adds observability and failure-demo proof:
 - Free-tier-safe k6 smoke load test
 - Failure-mode runbooks for worker crash, dead-letter, duplicate submission, and graceful shutdown demos
 
+Phase 6 adds cloud-native hardening:
+
+- Public GHCR image publishing from GitHub Actions
+- Kubernetes manifests for a full k3s PulseQueue deployment
+- Helm chart for the same full k3s deployment path
+- GCP scripts for temporary k3s proof and rollback to Docker Compose
+- Terraform free-tier guardrails and deployment docs
+
 ## Quickstart
 
 Create a local env file:
@@ -275,6 +283,40 @@ docs/observability.md
 docs/failure-modes.md
 ```
 
+Phase 6 docs:
+
+```text
+docs/architecture.md
+docs/gcp-runbook.md
+docs/scaling.md
+```
+
+For Phase 6 k3s proof, use the GHCR image published by GitHub Actions:
+
+```powershell
+.\deployments\gcp\scripts\deploy-k3s.ps1 `
+  -ProjectId pulsequeue-r7m5o9ld `
+  -Zone us-central1-a `
+  -Mode manifests `
+  -ImageRef ghcr.io/fullstack-nick/pulsequeue:sha-<shortsha> `
+  -OperatorToken "replace-with-secret" `
+  -PostgresPassword "replace-with-secret" `
+  -StopCompose `
+  -CleanupAfterProof
+
+.\deployments\gcp\scripts\deploy-k3s.ps1 `
+  -ProjectId pulsequeue-r7m5o9ld `
+  -Zone us-central1-a `
+  -Mode helm `
+  -ImageRef ghcr.io/fullstack-nick/pulsequeue:sha-<shortsha> `
+  -OperatorToken "replace-with-secret" `
+  -PostgresPassword "replace-with-secret" `
+  -StopCompose `
+  -CleanupAfterProof
+```
+
+The k3s path runs the complete PulseQueue stack on the GCP VM during the proof window: API, worker, scheduler, PostgreSQL, and NATS. Services stay cluster-internal and no new GCP firewall ports are required.
+
 Then verify Phase 2 behavior:
 
 ```powershell
@@ -303,6 +345,7 @@ Each phase is complete only when:
 - The phase behavior is exercised against the live GCP API and worker.
 - PostgreSQL row state and API/worker logs are verified on the VM.
 - PostgreSQL and NATS are not exposed through public firewall rules.
+- Kubernetes and Helm artifacts are verified on GCP-hosted k3s when they are part of the phase.
 
 ## Phase 1 Live Proof
 

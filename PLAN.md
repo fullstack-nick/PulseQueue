@@ -1222,6 +1222,12 @@ Goal:
 The project is demonstrably deployable and operable on GCP through the default Docker Compose path and the Kubernetes/Helm k3s path, not just runnable locally.
 ```
 
+Implementation note:
+
+```text
+Keep Docker Compose as the always-on free-tier runtime. Publish Phase 6 images to public GHCR tags, then use those images for temporary full-stack k3s proof on the existing GCP VM. During the k3s proof window, k3s must run the real API, worker, scheduler, PostgreSQL, and NATS stack, exercise real jobs, then clean up workloads and restore Compose.
+```
+
 ## 14. Failure Scenarios to Demonstrate
 
 Include these in future `docs/failure-modes.md` and the README.
