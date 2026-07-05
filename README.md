@@ -343,8 +343,8 @@ b00619a3-6f82-4ae0-bdec-74ac15762047  default  demo.echo  succeeded  1
 GCP firewall proof for the PulseQueue network:
 
 ```text
-pulsequeue-allow-operator-api  213.225.10.35/32  tcp:8080,tcp:9090
-pulsequeue-allow-operator-ssh  213.225.10.35/32  tcp:22
+pulsequeue-allow-operator-api  <operator-public-ip>/32  tcp:8080,tcp:9090
+pulsequeue-allow-operator-ssh  <operator-public-ip>/32  tcp:22
 ```
 
 ## Phase 5 Live Proof
@@ -431,7 +431,7 @@ nats            127.0.0.1:4222->4222/tcp, 127.0.0.1:8222->8222/tcp
 otel-collector  no public ports
 worker          no public ports
 scheduler       no public ports
-firewall        tcp:8080,tcp:9090 and tcp:22 only from 213.225.10.35/32
+firewall        tcp:8080,tcp:9090 and tcp:22 only from <operator-public-ip>/32
 ```
 
 ## Phase 2 Live Proof
@@ -493,8 +493,8 @@ ea62c9c9-0134-4567-aad1-86ae28424415  2               failed  job timed out
 GCP firewall proof for the PulseQueue network:
 
 ```text
-pulsequeue-allow-operator-api  213.225.10.35/32  tcp:8080,tcp:9090
-pulsequeue-allow-operator-ssh  213.225.10.35/32  tcp:22
+pulsequeue-allow-operator-api  <operator-public-ip>/32  tcp:8080,tcp:9090
+pulsequeue-allow-operator-ssh  <operator-public-ip>/32  tcp:22
 ```
 
 Container exposure on the VM:
@@ -590,6 +590,6 @@ worker-2     no public ports
 GCP firewall proof for the PulseQueue network:
 
 ```text
-pulsequeue-allow-operator-api  213.225.10.35/32  tcp:8080,tcp:9090
-pulsequeue-allow-operator-ssh  213.225.10.35/32  tcp:22
+pulsequeue-allow-operator-api  <operator-public-ip>/32  tcp:8080,tcp:9090
+pulsequeue-allow-operator-ssh  <operator-public-ip>/32  tcp:22
 ```
