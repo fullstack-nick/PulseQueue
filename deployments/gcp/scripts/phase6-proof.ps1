@@ -16,16 +16,18 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $go = "C:\Program Files\Go\bin\go.exe"
 
 function Invoke-ComposeDeploy {
-  $deployArgs = @(
-    "-ProjectId", $ProjectId,
-    "-Zone", $Zone,
-    "-Instance", $Instance,
-    "-OperatorToken", $OperatorToken,
-    "-PostgresPassword", $PostgresPassword,
-    "-BuildImageLocally"
-  )
+  $deployArgs = @{
+    ProjectId         = $ProjectId
+    Zone              = $Zone
+    Instance          = $Instance
+    OperatorToken     = $OperatorToken
+    PostgresPassword  = $PostgresPassword
+    BuildImageLocally = $true
+  }
   if ($EnableObservability) {
-    $deployArgs += @("-EnableObservability", "-GrafanaAdminUser", $GrafanaAdminUser, "-GrafanaAdminPassword", $GrafanaAdminPassword)
+    $deployArgs.EnableObservability = $true
+    $deployArgs.GrafanaAdminUser = $GrafanaAdminUser
+    $deployArgs.GrafanaAdminPassword = $GrafanaAdminPassword
   }
   & (Join-Path $PSScriptRoot "deploy.ps1") @deployArgs
 }
