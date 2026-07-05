@@ -19,7 +19,7 @@ $imageArchive = Join-Path $env:TEMP "pulsequeue-images.tar"
 Push-Location $root
 try {
   if (Test-Path $archive) { Remove-Item -LiteralPath $archive -Force }
-  tar --exclude .git --exclude .terraform --exclude terraform.tfstate --exclude terraform.tfvars -cf $archive .
+  tar --exclude .git --exclude .idea --exclude .terraform --exclude terraform.tfstate --exclude terraform.tfvars -cf $archive .
   if ($BuildImageLocally) {
     if (Test-Path $imageArchive) { Remove-Item -LiteralPath $imageArchive -Force }
     docker build -t pulsequeue:deploy .
