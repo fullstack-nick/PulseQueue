@@ -11,31 +11,35 @@ ROOT="/opt/pulsequeue/phase6"
 SECRET_FILE="/tmp/pulsequeue-k3s-secrets.env"
 
 cleanup_k3s() {
-  helm uninstall pulsequeue -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  for _ in $(seq 1 60); do
-    if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+  timeout 90s helm uninstall pulsequeue -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
+  timeout 60s kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    if ! timeout 10s kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
   done
   echo "namespace $NAMESPACE still exists after cleanup wait" >&2
-  kubectl get namespace "$NAMESPACE" -o yaml >&2 || true
+  timeout 20s kubectl get namespace "$NAMESPACE" -o yaml >&2 || true
   return 1
 }
 
+stop_k3s_runtime() {
+  sudo systemctl disable --now k3s >/dev/null 2>&1 || true
+}
+
 wait_for_rollouts() {
-  kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=240s
-  kubectl -n "$NAMESPACE" rollout status statefulset/nats --timeout=180s
-  kubectl -n "$NAMESPACE" rollout status deployment/pulsequeue-api --timeout=240s
-  kubectl -n "$NAMESPACE" rollout status deployment/pulsequeue-worker --timeout=180s
-  kubectl -n "$NAMESPACE" rollout status deployment/pulsequeue-scheduler --timeout=180s
+  timeout 270s kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=240s
+  timeout 210s kubectl -n "$NAMESPACE" rollout status statefulset/nats --timeout=180s
+  timeout 270s kubectl -n "$NAMESPACE" rollout status deployment/pulsequeue-api --timeout=240s
+  timeout 210s kubectl -n "$NAMESPACE" rollout status deployment/pulsequeue-worker --timeout=180s
+  timeout 210s kubectl -n "$NAMESPACE" rollout status deployment/pulsequeue-scheduler --timeout=180s
 }
 
 run_cli() {
   local name
   name="pulsequeue-proof-$(date +%s%N)"
-  kubectl -n "$NAMESPACE" run "$name" \
+  timeout 180s kubectl -n "$NAMESPACE" run "$name" \
     --rm -i \
     --restart=Never \
     --image="$IMAGE_REF" \
@@ -74,27 +78,28 @@ prove_app() {
 
   if [ "$status" != "succeeded" ]; then
     echo "job $job_id did not succeed; last status was ${status:-unknown}" >&2
-    kubectl -n "$NAMESPACE" logs deployment/pulsequeue-api --tail=80 >&2 || true
-    kubectl -n "$NAMESPACE" logs deployment/pulsequeue-worker --tail=80 >&2 || true
-    kubectl -n "$NAMESPACE" logs deployment/pulsequeue-scheduler --tail=80 >&2 || true
+    timeout 30s kubectl -n "$NAMESPACE" logs deployment/pulsequeue-api --tail=80 >&2 || true
+    timeout 30s kubectl -n "$NAMESPACE" logs deployment/pulsequeue-worker --tail=80 >&2 || true
+    timeout 30s kubectl -n "$NAMESPACE" logs deployment/pulsequeue-scheduler --tail=80 >&2 || true
     return 1
   fi
 
   run_cli workers list
-  readback="$(kubectl -n "$NAMESPACE" exec postgres-0 -- psql -U pulsequeue -d pulsequeue -tAc "select id::text || '|' || type || '|' || status || '|' || attempt_count::text from jobs where id = '$job_id'")"
+  readback="$(timeout 60s kubectl -n "$NAMESPACE" exec postgres-0 -- psql -U pulsequeue -d pulsequeue -tAc "select id::text || '|' || type || '|' || status || '|' || attempt_count::text from jobs where id = '$job_id'")"
   echo "postgres_readback=$readback"
   if ! printf '%s' "$readback" | grep -q "|demo.echo|succeeded|1"; then
     echo "unexpected PostgreSQL readback for job $job_id" >&2
     return 1
   fi
 
-  kubectl -n "$NAMESPACE" get pods -o wide
-  kubectl -n "$NAMESPACE" get svc -o wide
-  kubectl -n "$NAMESPACE" get hpa -o wide || true
+  timeout 30s kubectl -n "$NAMESPACE" get pods -o wide
+  timeout 30s kubectl -n "$NAMESPACE" get svc -o wide
+  timeout 30s kubectl -n "$NAMESPACE" get hpa -o wide || true
 }
 
 if [ "$MODE" = "cleanup" ]; then
   cleanup_k3s
+  stop_k3s_runtime
   exit 0
 fi
 
@@ -121,30 +126,31 @@ fi
 
 if [ "$STOP_COMPOSE" = "true" ] && [ -d /opt/pulsequeue/app ]; then
   cd /opt/pulsequeue/app
-  docker compose -f deployments/docker-compose.yml --env-file .env down || true
+  docker compose -f deployments/docker-compose.yml --env-file .env --profile observability down || true
 fi
+sudo systemctl stop docker >/dev/null 2>&1 || true
 
 cd "$ROOT"
 cleanup_k3s
-kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "$NAMESPACE" create secret generic pulsequeue-secrets \
+timeout 30s kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | timeout 60s kubectl apply -f -
+timeout 30s kubectl -n "$NAMESPACE" create secret generic pulsequeue-secrets \
   --from-literal=operator-token="$OPERATOR_TOKEN" \
   --from-literal=postgres-password="$POSTGRES_PASSWORD" \
-  --dry-run=client -o yaml | kubectl apply -f -
+  --dry-run=client -o yaml | timeout 60s kubectl apply -f -
 
 case "$MODE" in
   manifests)
-    kubectl apply -f deployments/k8s
-    kubectl -n "$NAMESPACE" set image deployment/pulsequeue-api api="$IMAGE_REF"
-    kubectl -n "$NAMESPACE" set image deployment/pulsequeue-worker worker="$IMAGE_REF"
-    kubectl -n "$NAMESPACE" set image deployment/pulsequeue-scheduler scheduler="$IMAGE_REF"
+    timeout 120s kubectl apply -f deployments/k8s
+    timeout 60s kubectl -n "$NAMESPACE" set image deployment/pulsequeue-api api="$IMAGE_REF"
+    timeout 60s kubectl -n "$NAMESPACE" set image deployment/pulsequeue-worker worker="$IMAGE_REF"
+    timeout 60s kubectl -n "$NAMESPACE" set image deployment/pulsequeue-scheduler scheduler="$IMAGE_REF"
     wait_for_rollouts
     prove_app "phase6 k3s manifests proof"
     ;;
   helm)
     image_repo="${IMAGE_REF%:*}"
     image_tag="${IMAGE_REF##*:}"
-    helm upgrade --install pulsequeue deployments/helm/pulsequeue \
+    timeout 360s helm upgrade --install pulsequeue deployments/helm/pulsequeue \
       --namespace "$NAMESPACE" \
       --set namespace="$NAMESPACE" \
       --set image.repository="$image_repo" \
@@ -163,4 +169,5 @@ esac
 
 if [ "$CLEANUP_AFTER" = "true" ]; then
   cleanup_k3s
+  stop_k3s_runtime
 fi

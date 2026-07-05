@@ -39,6 +39,13 @@ spec:
         - name: postgres
           image: postgres:18
           imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - shared_buffers=16MB
+            - -c
+            - max_connections=20
+            - -c
+            - work_mem=2MB
           ports:
             - name: postgres
               containerPort: 5432

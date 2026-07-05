@@ -22,12 +22,18 @@ config:
   retryInitialDelay: 2s
   retryMaxDelay: 30s
   otlpEndpoint: ""
+  goMemLimit: 64MiB
+  goGC: "75"
 
 postgres:
   image: postgres:18
   user: pulsequeue
   database: pulsequeue
   storage: 1Gi
+  settings:
+    sharedBuffers: 16MB
+    maxConnections: "20"
+    workMem: 2MB
   resources:
     requests:
       cpu: 50m

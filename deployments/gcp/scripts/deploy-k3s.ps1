@@ -20,20 +20,42 @@ if ($Mode -ne "cleanup" -and [string]::IsNullOrWhiteSpace($OperatorToken)) {
   throw "OperatorToken is required unless Mode is cleanup."
 }
 
+if ($StopCompose) {
+  gcloud compute ssh $Instance --project $ProjectId --zone $Zone --command "if [ -d /opt/pulsequeue/app ]; then cd /opt/pulsequeue/app && docker compose -f deployments/docker-compose.yml --env-file .env --profile observability down || true; fi; sudo systemctl stop docker || true; sudo systemctl stop containerd || true"
+  if ($LASTEXITCODE -ne 0) {
+    throw "failed to stop Compose/Docker before k3s proof."
+  }
+}
+
 & (Join-Path $PSScriptRoot "install-k3s.ps1") -ProjectId $ProjectId -Zone $Zone -Instance $Instance
 
 Push-Location $root
 try {
   if (Test-Path $archive) { Remove-Item -LiteralPath $archive -Force }
   tar -cf $archive deployments/k8s deployments/helm
+  if ($LASTEXITCODE -ne 0) {
+    throw "failed to create k3s artifact archive."
+  }
 } finally {
   Pop-Location
 }
 
 gcloud compute ssh $Instance --project $ProjectId --zone $Zone --command "mkdir -p /opt/pulsequeue/phase6"
+if ($LASTEXITCODE -ne 0) {
+  throw "failed to create remote k3s artifact directory."
+}
 gcloud compute scp $archive "${Instance}:/tmp/pulsequeue-k3s-artifacts.tar" --project $ProjectId --zone $Zone
+if ($LASTEXITCODE -ne 0) {
+  throw "failed to copy k3s artifact archive."
+}
 gcloud compute scp "$PSScriptRoot\deploy-k3s-remote.sh" "${Instance}:/tmp/pulsequeue-deploy-k3s-remote.sh" --project $ProjectId --zone $Zone
+if ($LASTEXITCODE -ne 0) {
+  throw "failed to copy deploy-k3s-remote.sh."
+}
 gcloud compute ssh $Instance --project $ProjectId --zone $Zone --command "rm -rf /opt/pulsequeue/phase6/* && tar -xf /tmp/pulsequeue-k3s-artifacts.tar -C /opt/pulsequeue/phase6 && chmod +x /tmp/pulsequeue-deploy-k3s-remote.sh"
+if ($LASTEXITCODE -ne 0) {
+  throw "failed to extract remote k3s artifacts."
+}
 
 if ($Mode -ne "cleanup") {
   $operatorTokenB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($OperatorToken))
@@ -45,6 +67,9 @@ if ($Mode -ne "cleanup") {
   Set-Content -LiteralPath $secretFile -Value $secretContent -NoNewline
   try {
     gcloud compute scp $secretFile "${Instance}:/tmp/pulsequeue-k3s-secrets.env" --project $ProjectId --zone $Zone
+    if ($LASTEXITCODE -ne 0) {
+      throw "failed to copy k3s runtime secret file."
+    }
   } finally {
     Remove-Item -LiteralPath $secretFile -Force -ErrorAction SilentlyContinue
   }
@@ -54,3 +79,6 @@ $stopComposeArg = if ($StopCompose) { "true" } else { "false" }
 $cleanupArg = if ($CleanupAfterProof) { "true" } else { "false" }
 $command = "bash /tmp/pulsequeue-deploy-k3s-remote.sh '$Mode' '$ImageRef' '$Namespace' '$stopComposeArg' '$cleanupArg'"
 gcloud compute ssh $Instance --project $ProjectId --zone $Zone --command $command
+if ($LASTEXITCODE -ne 0) {
+  throw "deploy-k3s-remote.sh failed for mode $Mode."
+}

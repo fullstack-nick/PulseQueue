@@ -7,7 +7,11 @@ if [ -d "$HOME/.docker" ]; then
   sudo chown -R "$USER":"$USER" "$HOME/.docker" || true
 fi
 
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+if command -v docker >/dev/null 2>&1; then
+  sudo systemctl enable --now docker
+fi
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   docker --version
   docker compose version
   exit 0
@@ -35,5 +39,6 @@ else
   sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
 sudo usermod -aG docker "$USER"
+sudo systemctl enable --now docker
 docker --version
 docker compose version

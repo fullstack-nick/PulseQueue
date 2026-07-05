@@ -1228,6 +1228,28 @@ Implementation note:
 Keep Docker Compose as the always-on free-tier runtime. Publish Phase 6 images to public GHCR tags, then use those images for temporary full-stack k3s proof on the existing GCP VM. During the k3s proof window, k3s must run the real API, worker, scheduler, PostgreSQL, and NATS stack, exercise real jobs, then clean up workloads and restore Compose.
 ```
 
+Live proof status on 2026-07-05:
+
+```text
+Docker Compose was restored as the live default runtime after k3s attempts.
+Final Compose proof passed against http://35.254.165.175:8080:
+- /health/live 200
+- /health/ready 200
+- demo.echo job 4cb09668-d405-44d6-bd1d-60443b011b15 succeeded with attempt_count 1
+- PostgreSQL readback returned demo.echo | succeeded | 1
+- k3s service was inactive after cleanup
+
+Raw k3s manifest proof did not complete on the e2-micro VM.
+The closest attempt used k3s v1.29.15+k3s1, disabled Traefik, ServiceLB, Helm controller, metrics-server, and network policy, used 1 GiB swap, stopped Docker/containerd, and placed the k3s SQLite datastore on tmpfs.
+Kubernetes created the namespace, secret, services, StatefulSets, Deployments, and HPA and pulled the GHCR image ghcr.io/fullstack-nick/pulsequeue:sha-e4c54d2.
+The VM then saturated: kubectl calls timed out, serial logs showed apiserver/kine timeouts, and the raw rollout did not reach a stable app proof.
+Helm live proof was not attempted because the raw k3s runtime was not stable enough to prove the app safely.
+
+Do not mark Phase 6 complete until either:
+- the existing VM can run the full k3s app proof reliably after further reductions, or
+- the plan is explicitly changed to allow a larger or separate proof host.
+```
+
 ## 14. Failure Scenarios to Demonstrate
 
 Include these in future `docs/failure-modes.md` and the README.

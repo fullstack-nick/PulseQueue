@@ -23,3 +23,5 @@ data:
   PULSEQUEUE_WORKER_METRICS_ADDR: {{ .Values.worker.metricsAddr | quote }}
   PULSEQUEUE_SCHEDULER_METRICS_ADDR: {{ .Values.scheduler.metricsAddr | quote }}
   PULSEQUEUE_OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otlpEndpoint | quote }}
+  GOMEMLIMIT: {{ .Values.config.goMemLimit | quote }}
+  GOGC: {{ .Values.config.goGC | quote }}
