@@ -1,71 +1,76 @@
 # PulseQueue
 
-PulseQueue is a production-style durable job queue and workflow orchestration platform in Go.
+PulseQueue is a durable background job queue and workflow runtime written in Go. It exposes a small operator-authenticated REST API, a CLI, and gRPC health; stores job state in PostgreSQL; uses NATS for wake-up signaling; and runs as separate API, worker, and scheduler processes from the same binary.
 
-Phase 1 implements the durable job core:
+It is built to demonstrate production-grade queue behavior without relying on managed services: retries, dead-lettering, idempotency, delayed execution, cron scheduling, worker heartbeats, lease recovery, logs, metrics, traces, Docker Compose deployment, and a live-proven Kubernetes/Helm path.
 
-- PostgreSQL-backed job persistence
-- NATS wake-up signaling
-- REST API with operator-token auth
-- gRPC health skeleton and committed API proto
-- Worker loop with `FOR UPDATE SKIP LOCKED` leasing
-- Built-in `demo.echo` handler
-- CLI for health checks and basic job operations
-- Docker Compose runtime for local and GCP VM deployment
-- Terraform baseline for a GCP free-tier Compute Engine VM
+## What It Does
 
-Phase 2 adds reliable execution:
+- Accepts durable jobs through REST or CLI and stores them in PostgreSQL.
+- Executes jobs with worker leases using PostgreSQL row locking.
+- Supports deterministic retries with exponential backoff and a `dead_letter` terminal state.
+- Records per-attempt history and durable per-job logs.
+- Handles execution timeouts with Go `context.Context`.
+- Supports idempotency keys for duplicate-safe submissions.
+- Schedules delayed jobs and 5-field UTC cron jobs.
+- Tracks workers, heartbeats, queues, and scheduler recovery.
+- Exposes Prometheus metrics, Grafana dashboards, and OpenTelemetry traces.
+- Ships Docker Compose, Terraform, raw Kubernetes manifests, and a Helm chart.
+- Publishes public images to `ghcr.io/fullstack-nick/pulsequeue`.
 
-- Per-attempt history in PostgreSQL
-- Lease-fenced success and failure transitions
-- Deterministic exponential-backoff retries
-- `dead_letter` terminal state after attempts are exhausted
-- Timeout-aware worker execution with `context.Context`
-- Built-in `demo.fail` and `demo.sleep` handlers for failure proof
-- CLI/API attempt inspection
+## Architecture
 
-Phase 3 adds distributed worker and scheduler coordination:
+```text
+CLI / REST clients
+        |
+        v
+PulseQueue API  ---- health, jobs, cron, workers, queues, metrics
+        |
+        +---- PostgreSQL: jobs, attempts, logs, workers, cron, migrations
+        |
+        +---- NATS: wake-up signal path
+                 |
+                 +---- workers: leased execution, heartbeats, handler logs
+                 |
+                 +---- scheduler: delayed jobs, retries, cron fires, lease recovery
+```
 
-- Worker registration and heartbeats
-- Configurable worker concurrency
-- Scheduler reconciliation for due jobs and expired leases
-- Delayed job submission with `delay_seconds`
-- REST/CLI worker visibility
-- Docker Compose scheduler service for local and GCP VM deployment
+The same `pulsequeue` binary runs in three roles:
 
-Phase 4 adds command-line operations and cron/log visibility:
+```text
+pulsequeue server
+pulsequeue worker
+pulsequeue scheduler
+```
 
-- UTC 5-field cron jobs that enqueue normal durable jobs
-- Active-active scheduler duplicate protection for cron fires
-- Durable per-job logs retrievable through REST and CLI
-- Queue summaries, manual retry, and queued-job cancellation
-- Expanded Cobra CLI for cron, queues, logs, retry, and cancel
+PostgreSQL is the durability boundary. NATS can be unavailable temporarily without losing jobs, but readiness fails while NATS is unavailable because workers and schedulers depend on it for prompt wake-ups.
 
-Phase 5 adds observability and failure-demo proof:
+## Tech Stack
 
-- Prometheus metrics on API, worker, and scheduler paths
-- Grafana dashboard provisioned through Docker Compose
-- OpenTelemetry traces exported to a lightweight collector
-- Free-tier-safe k6 smoke load test
-- Failure-mode runbooks for worker crash, dead-letter, duplicate submission, and graceful shutdown demos
+| Area | Technology |
+| --- | --- |
+| Language | Go 1.26 |
+| HTTP API | chi |
+| CLI | Cobra |
+| Database | PostgreSQL 18, pgx |
+| Signaling | NATS 2.12 |
+| Metrics | Prometheus client, Prometheus server, Grafana |
+| Tracing | OpenTelemetry collector |
+| Local runtime | Docker Compose |
+| Cloud runtime | Terraform-managed GCP Compute Engine VM with Docker Compose |
+| Kubernetes proof | k3s, raw manifests, Helm |
+| CI/CD | GitHub Actions, Docker Buildx, GHCR |
+| Validation | Go test/vet, Docker build, Helm lint/template, kubeconform, Terraform validate, cost guardrail |
 
-Phase 6 adds cloud-native hardening:
+## Local Demo
 
-- Public GHCR image publishing from GitHub Actions
-- Kubernetes manifests for a full k3s PulseQueue deployment
-- Helm chart for the same full k3s deployment path
-- GCP scripts for temporary k3s proof and rollback to Docker Compose
-- Terraform free-tier guardrails and deployment docs
-
-## Quickstart
-
-Create a local env file:
+Create a local environment file:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Set a non-default token in `.env`:
+Set a non-default operator token in `.env`:
 
 ```text
 PULSEQUEUE_OPERATOR_TOKEN=change-this
@@ -77,7 +82,7 @@ Start the stack:
 docker compose -f deployments/docker-compose.yml up --build
 ```
 
-Check health:
+Use the CLI against the local API:
 
 ```powershell
 $env:PULSEQUEUE_OPERATOR_TOKEN="change-this"
@@ -85,14 +90,14 @@ $env:PULSEQUEUE_API_URL="http://localhost:8080"
 go run ./cmd/pulsequeue health
 ```
 
-Submit and inspect a job:
+Submit and inspect a normal job:
 
 ```powershell
 go run ./cmd/pulsequeue jobs submit --queue default --type demo.echo --payload '{"message":"hello"}'
 go run ./cmd/pulsequeue jobs list
 ```
 
-Exercise retries and dead-letter handling:
+Exercise reliable execution:
 
 ```powershell
 go run ./cmd/pulsequeue jobs submit --type demo.fail --max-attempts 3 --payload '{"message":"planned failure"}'
@@ -108,16 +113,11 @@ go run ./cmd/pulsequeue jobs status JOB_ID
 go run ./cmd/pulsequeue jobs attempts JOB_ID
 ```
 
-Exercise delayed jobs and worker visibility:
+Exercise scheduling and operations:
 
 ```powershell
 go run ./cmd/pulsequeue jobs submit --type demo.echo --delay-seconds 10 --payload '{"message":"delayed"}'
 go run ./cmd/pulsequeue workers list
-```
-
-Exercise Phase 4 CLI operations:
-
-```powershell
 go run ./cmd/pulsequeue queues list
 go run ./cmd/pulsequeue cron create --name every-minute-demo --schedule "* * * * *" --type demo.echo --payload '{"message":"from cron"}'
 go run ./cmd/pulsequeue cron list
@@ -126,7 +126,7 @@ go run ./cmd/pulsequeue jobs cancel QUEUED_JOB_ID
 go run ./cmd/pulsequeue jobs retry DEAD_LETTER_OR_CANCELLED_JOB_ID
 ```
 
-Exercise Phase 5 observability locally:
+Start local observability:
 
 ```powershell
 $env:PULSEQUEUE_WORKER_METRICS_ADDR=":2112"
@@ -138,12 +138,13 @@ docker compose -f deployments/docker-compose.yml --profile observability up --bu
 Then open:
 
 ```text
-Grafana:    http://localhost:13000
-Prometheus: http://localhost:19090
+Grafana:     http://localhost:13000
+Prometheus:  http://localhost:19090
 API metrics: http://localhost:8080/metrics
+NATS monitor: http://localhost:8222/varz
 ```
 
-## API
+## API Surface
 
 Unauthenticated:
 
@@ -171,7 +172,7 @@ POST /cron/{id-or-name}/enable
 POST /cron/{id-or-name}/disable
 ```
 
-Example:
+Example REST submission:
 
 ```powershell
 $headers = @{ Authorization = "Bearer change-this" }
@@ -183,14 +184,30 @@ $body = @{
   timeout_seconds = 10
   delay_seconds = 0
 } | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri http://localhost:8080/jobs -Headers $headers -Body $body -ContentType "application/json"
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8080/jobs `
+  -Headers $headers `
+  -Body $body `
+  -ContentType "application/json"
 ```
 
-## GCP Phase 1 Deployment
+## GCP Deployment
 
-The required live proof path is a Terraform-managed GCP Compute Engine VM with Docker Compose over SSH.
+The normal cloud runtime is Docker Compose on a Terraform-managed GCP Compute Engine VM. The current deployment target used by the runbooks is:
 
-Prepare an isolated GCP project, then create `deployments/gcp/terraform/terraform.tfvars` from the example:
+```text
+Project: pulsequeue-r7m5o9ld
+Region: us-central1
+Zone: us-central1-a
+Instance: pulsequeue-phase1
+Default machine: e2-micro
+```
+
+Only API/gRPC and SSH are reachable through GCP firewall rules, and only from the operator CIDR. PostgreSQL, NATS, Prometheus, Grafana, workers, and scheduler stay private.
+
+Create `deployments/gcp/terraform/terraform.tfvars` from the example:
 
 ```hcl
 project_id    = "pulsequeue-r7m5o9ld"
@@ -199,26 +216,27 @@ zone          = "us-central1-a"
 operator_cidr = "YOUR_PUBLIC_IP/32"
 ```
 
-Provision:
+Provision infrastructure:
 
 ```powershell
 terraform -chdir=deployments/gcp/terraform init
 terraform -chdir=deployments/gcp/terraform apply
 ```
 
-Deploy:
+Deploy with the proven local-image path:
 
 ```powershell
 .\deployments\gcp\scripts\deploy.ps1 `
   -ProjectId pulsequeue-r7m5o9ld `
   -Zone us-central1-a `
   -OperatorToken "replace-with-secret" `
+  -PostgresPassword "replace-with-secret" `
   -BuildImageLocally
 ```
 
-`-BuildImageLocally` is recommended for the free-tier VM because it builds the Linux image locally, loads it onto the VM, and recreates Compose services without doing a resource-heavy remote build.
+`-BuildImageLocally` builds the Linux image locally, transfers it to the VM, loads it with Docker, and recreates Compose services without doing a resource-heavy remote image build.
 
-Then verify live:
+Verify the live deployment:
 
 ```powershell
 $env:PULSEQUEUE_API_URL="http://VM_PUBLIC_IP:8080"
@@ -228,13 +246,14 @@ go run ./cmd/pulsequeue jobs submit --type demo.echo --payload '{"message":"live
 go run ./cmd/pulsequeue jobs list
 ```
 
-For Phase 5 observability proof, deploy with the observability profile:
+Deploy with observability:
 
 ```powershell
 .\deployments\gcp\scripts\deploy.ps1 `
   -ProjectId pulsequeue-r7m5o9ld `
   -Zone us-central1-a `
   -OperatorToken "replace-with-secret" `
+  -PostgresPassword "replace-with-secret" `
   -BuildImageLocally `
   -EnableObservability `
   -GrafanaAdminPassword "replace-with-grafana-password"
@@ -256,42 +275,24 @@ Grafana:    http://localhost:13000
 Prometheus: http://localhost:19090
 ```
 
-Run the free-tier-safe k6 smoke:
+## Kubernetes And Helm Proof
 
-```powershell
-$env:BASE_URL="http://VM_PUBLIC_IP:8080"
-$env:TOKEN="replace-with-secret"
-k6 run load/k6/phase5-smoke.js
-```
+Docker Compose remains the default always-on GCP runtime. Kubernetes is provided as a live-proven proof path using k3s on the same GCP VM during a planned maintenance window.
 
-Without a local `k6` install:
-
-```powershell
-$k6Dir=(Resolve-Path load\k6).Path
-docker run --rm `
-  -v "${k6Dir}:/scripts" `
-  grafana/k6:latest run `
-  -e BASE_URL=$env:BASE_URL `
-  -e TOKEN=$env:TOKEN `
-  /scripts/phase5-smoke.js
-```
-
-Phase 5 runbooks:
+During the k3s window, k3s runs the real PulseQueue stack:
 
 ```text
-docs/observability.md
-docs/failure-modes.md
+PostgreSQL StatefulSet
+NATS StatefulSet
+API Deployment and ClusterIP Service
+Worker Deployment and HPA
+Scheduler Deployment
+runtime Secret and ConfigMap
 ```
 
-Phase 6 docs:
+Services are ClusterIP only. No LoadBalancer, NodePort, GKE, Cloud SQL, Artifact Registry, Memorystore, or public PostgreSQL/NATS endpoint is introduced.
 
-```text
-docs/architecture.md
-docs/gcp-runbook.md
-docs/scaling.md
-```
-
-For Phase 6 k3s proof, use the GHCR image published by GitHub Actions:
+Use the GHCR image published by GitHub Actions:
 
 ```powershell
 .\deployments\gcp\scripts\deploy-k3s.ps1 `
@@ -315,47 +316,50 @@ For Phase 6 k3s proof, use the GHCR image published by GitHub Actions:
   -CleanupAfterProof
 ```
 
-The k3s path runs the complete PulseQueue stack on the GCP VM during the proof window: API, worker, scheduler, PostgreSQL, and NATS. Services stay cluster-internal and no new GCP firewall ports are required.
+Full cluster and stress verification can temporarily resize the same VM if `e2-micro` is too small. The required end state is cleanup of k3s workloads, k3s stopped, and Docker Compose restored on `e2-micro`.
 
-Then verify Phase 2 behavior:
+## CI And Images
 
-```powershell
-go run ./cmd/pulsequeue jobs submit --type demo.fail --max-attempts 3 --payload '{"message":"live retry proof"}' --output json
-go run ./cmd/pulsequeue jobs status JOB_ID
-go run ./cmd/pulsequeue jobs attempts JOB_ID
-go run ./cmd/pulsequeue jobs submit --type demo.echo --idempotency-key live-duplicate-proof --payload '{"message":"first"}'
-go run ./cmd/pulsequeue jobs submit --type demo.echo --idempotency-key live-duplicate-proof --payload '{"message":"second"}'
-go run ./cmd/pulsequeue jobs submit --type demo.sleep --timeout-seconds 1 --max-attempts 2 --payload '{"duration_ms":3000}' --output json
+GitHub Actions validates:
+
+```text
+go test ./...
+go vet ./...
+docker build
+helm lint
+helm template
+kubeconform for raw manifests and rendered Helm output
+terraform fmt/init/validate
+managed-service cost guardrail
 ```
 
-Also SSH into the VM and inspect service state:
+On pushes to `main`, the workflow publishes:
 
-```powershell
-gcloud compute ssh pulsequeue-phase1 --project pulsequeue-r7m5o9ld --zone us-central1-a --command "cd /opt/pulsequeue/app && docker compose -f deployments/docker-compose.yml --env-file .env logs --tail=80 api worker"
+```text
+ghcr.io/fullstack-nick/pulsequeue:main
+ghcr.io/fullstack-nick/pulsequeue:sha-<shortsha>
 ```
 
-## Phase Completion Gate
+## Supporting Docs
 
-Each phase is complete only when:
+```text
+docs/architecture.md      Architecture and runtime boundaries
+docs/gcp-runbook.md       GCP Compose, k3s, Helm, cleanup, rollback
+docs/scaling.md           Worker replicas, concurrency, HPA, free-tier limits
+docs/observability.md     Metrics, dashboards, traces
+docs/failure-modes.md     Failure demos and expected evidence
+```
 
-- Code is pushed to public `fullstack-nick/PulseQueue`.
-- GitHub Actions passes.
-- GCP VM infrastructure is applied through Terraform.
-- The stack is deployed through SSH.
-- The phase behavior is exercised against the live GCP API and worker.
-- PostgreSQL row state and API/worker logs are verified on the VM.
-- PostgreSQL and NATS are not exposed through public firewall rules.
-- Kubernetes and Helm artifacts are verified on GCP-hosted k3s when they are part of the phase.
+## Live Proof History
 
-## Phase 6 Live Proof
+Newest proof is listed first. These are live GCP records, not local-only checks.
 
-Recorded on 2026-07-05 UTC / 2026-07-05 Europe/Berlin.
+### 2026-07-05 Cloud-Native And Full-App Proof
 
 ```text
 GitHub repo: https://github.com/fullstack-nick/PulseQueue
-Implementation commit: 824ad57
+Verified image: ghcr.io/fullstack-nick/pulsequeue:sha-824ad57
 GitHub Actions: ci run 28747756264 succeeded
-Published image: ghcr.io/fullstack-nick/pulsequeue:sha-824ad57
 GCP project: pulsequeue-r7m5o9ld
 GCP VM: pulsequeue-phase1
 GCP zone: us-central1-a
@@ -418,52 +422,7 @@ NATS monitor endpoint: http://127.0.0.1:8222/varz returned server state
 Public exposure: API 8080 and gRPC 9090 only; PostgreSQL, NATS, Prometheus, and Grafana stayed private
 ```
 
-## Phase 1 Live Proof
-
-Recorded on 2026-07-04.
-
-```text
-GitHub repo: https://github.com/fullstack-nick/PulseQueue
-GitHub Actions: passed on main
-GCP project: pulsequeue-r7m5o9ld
-GCP VM: pulsequeue-phase1
-GCP region/zone: us-central1 / us-central1-a
-Live API: http://35.254.165.175:8080
-```
-
-Live health:
-
-```text
-/health/live 200 {"status":"live"}
-/health/ready 200 {"status":"ready"}
-```
-
-Live job proof:
-
-```text
-Submitted job: b00619a3-6f82-4ae0-bdec-74ac15762047
-Type: demo.echo
-Final status: succeeded
-Attempt count: 1
-```
-
-PostgreSQL readback on the GCP VM:
-
-```text
-id                                    queue    type       status     attempt_count
-b00619a3-6f82-4ae0-bdec-74ac15762047  default  demo.echo  succeeded  1
-```
-
-GCP firewall proof for the PulseQueue network:
-
-```text
-pulsequeue-allow-operator-api  <operator-public-ip>/32  tcp:8080,tcp:9090
-pulsequeue-allow-operator-ssh  <operator-public-ip>/32  tcp:22
-```
-
-## Phase 5 Live Proof
-
-Recorded on 2026-07-05 UTC / 2026-07-05 Europe/Berlin.
+### 2026-07-05 Observability And Failure Proof
 
 ```text
 GitHub repo: https://github.com/fullstack-nick/PulseQueue
@@ -548,81 +507,7 @@ scheduler       no public ports
 firewall        tcp:8080,tcp:9090 and tcp:22 only from <operator-public-ip>/32
 ```
 
-## Phase 2 Live Proof
-
-Recorded on 2026-07-04 UTC / 2026-07-05 Europe/Berlin.
-
-```text
-GitHub repo: https://github.com/fullstack-nick/PulseQueue
-GCP project: pulsequeue-r7m5o9ld
-GCP VM: pulsequeue-phase1
-GCP region/zone: us-central1 / us-central1-a
-Live API: http://35.254.165.175:8080
-Deployment path: local image build + docker load + Docker Compose recreate
-```
-
-Live health:
-
-```text
-/health/live 200 {"status":"live"}
-/health/ready 200 {"status":"ready"}
-```
-
-Live Phase 2 behavior:
-
-```text
-demo.fail job: 79f33cde-7652-4e0e-bc91-e0f4532eff27
-Final status: dead_letter
-Attempt count: 3
-Attempt rows: 3
-
-idempotency key: live-duplicate-proof-20260705003151
-Returned job id both times: 320217ce-3709-4544-a547-5aed1da30831
-Second submission existing: true
-PostgreSQL rows for key: 1
-
-demo.sleep job: ea62c9c9-0134-4567-aad1-86ae28424415
-Timeout seconds: 1
-Final status: dead_letter
-Attempt count: 2
-Attempt rows: 2
-```
-
-PostgreSQL readback on the GCP VM:
-
-```text
-id                                    type        status       attempt_count  max_attempts  timeout_seconds  last_error
-79f33cde-7652-4e0e-bc91-e0f4532eff27  demo.fail   dead_letter  3              3                             live retry proof
-320217ce-3709-4544-a547-5aed1da30831  demo.echo   succeeded    1              1
-ea62c9c9-0134-4567-aad1-86ae28424415  demo.sleep  dead_letter  2              2             1                job timed out
-
-job_id                                attempt_number  status  error_message
-79f33cde-7652-4e0e-bc91-e0f4532eff27  1               failed  live retry proof
-79f33cde-7652-4e0e-bc91-e0f4532eff27  2               failed  live retry proof
-79f33cde-7652-4e0e-bc91-e0f4532eff27  3               failed  live retry proof
-ea62c9c9-0134-4567-aad1-86ae28424415  1               failed  job timed out
-ea62c9c9-0134-4567-aad1-86ae28424415  2               failed  job timed out
-```
-
-GCP firewall proof for the PulseQueue network:
-
-```text
-pulsequeue-allow-operator-api  <operator-public-ip>/32  tcp:8080,tcp:9090
-pulsequeue-allow-operator-ssh  <operator-public-ip>/32  tcp:22
-```
-
-Container exposure on the VM:
-
-```text
-api       0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp
-postgres 127.0.0.1:5432->5432/tcp
-nats      127.0.0.1:4222->4222/tcp, 127.0.0.1:8222->8222/tcp
-worker    no public ports
-```
-
-## Phase 3 Live Proof
-
-Recorded on 2026-07-04 UTC / 2026-07-05 Europe/Berlin.
+### 2026-07-04 Distributed Worker And Scheduler Proof
 
 ```text
 GitHub repo: https://github.com/fullstack-nick/PulseQueue
@@ -642,7 +527,7 @@ Live health:
 /health/ready 200 {"status":"ready"}
 ```
 
-Live Phase 3 behavior:
+Distributed behavior:
 
 ```text
 Mixed-priority batch:
@@ -699,6 +584,105 @@ scheduler-1  no public ports
 scheduler-2  no public ports
 worker-1     no public ports
 worker-2     no public ports
+firewall     tcp:8080,tcp:9090 and tcp:22 only from <operator-public-ip>/32
+```
+
+### 2026-07-04 Reliable Execution Proof
+
+```text
+GitHub repo: https://github.com/fullstack-nick/PulseQueue
+GCP project: pulsequeue-r7m5o9ld
+GCP VM: pulsequeue-phase1
+GCP region/zone: us-central1 / us-central1-a
+Live API: http://35.254.165.175:8080
+Deployment path: local image build + docker load + Docker Compose recreate
+```
+
+Live health:
+
+```text
+/health/live 200 {"status":"live"}
+/health/ready 200 {"status":"ready"}
+```
+
+Reliable execution behavior:
+
+```text
+demo.fail job: 79f33cde-7652-4e0e-bc91-e0f4532eff27
+Final status: dead_letter
+Attempt count: 3
+Attempt rows: 3
+
+idempotency key: live-duplicate-proof-20260705003151
+Returned job id both times: 320217ce-3709-4544-a547-5aed1da30831
+Second submission existing: true
+PostgreSQL rows for key: 1
+
+demo.sleep job: ea62c9c9-0134-4567-aad1-86ae28424415
+Timeout seconds: 1
+Final status: dead_letter
+Attempt count: 2
+Attempt rows: 2
+```
+
+PostgreSQL readback on the GCP VM:
+
+```text
+id                                    type        status       attempt_count  max_attempts  timeout_seconds  last_error
+79f33cde-7652-4e0e-bc91-e0f4532eff27  demo.fail   dead_letter  3              3                             live retry proof
+320217ce-3709-4544-a547-5aed1da30831  demo.echo   succeeded    1              1
+ea62c9c9-0134-4567-aad1-86ae28424415  demo.sleep  dead_letter  2              2             1                job timed out
+
+job_id                                attempt_number  status  error_message
+79f33cde-7652-4e0e-bc91-e0f4532eff27  1               failed  live retry proof
+79f33cde-7652-4e0e-bc91-e0f4532eff27  2               failed  live retry proof
+79f33cde-7652-4e0e-bc91-e0f4532eff27  3               failed  live retry proof
+ea62c9c9-0134-4567-aad1-86ae28424415  1               failed  job timed out
+ea62c9c9-0134-4567-aad1-86ae28424415  2               failed  job timed out
+```
+
+Container exposure on the VM:
+
+```text
+api       0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp
+postgres 127.0.0.1:5432->5432/tcp
+nats      127.0.0.1:4222->4222/tcp, 127.0.0.1:8222->8222/tcp
+worker    no public ports
+firewall  tcp:8080,tcp:9090 and tcp:22 only from <operator-public-ip>/32
+```
+
+### 2026-07-04 Initial Durable Queue Proof
+
+```text
+GitHub repo: https://github.com/fullstack-nick/PulseQueue
+GitHub Actions: passed on main
+GCP project: pulsequeue-r7m5o9ld
+GCP VM: pulsequeue-phase1
+GCP region/zone: us-central1 / us-central1-a
+Live API: http://35.254.165.175:8080
+```
+
+Live health:
+
+```text
+/health/live 200 {"status":"live"}
+/health/ready 200 {"status":"ready"}
+```
+
+Live job proof:
+
+```text
+Submitted job: b00619a3-6f82-4ae0-bdec-74ac15762047
+Type: demo.echo
+Final status: succeeded
+Attempt count: 1
+```
+
+PostgreSQL readback on the GCP VM:
+
+```text
+id                                    queue    type       status     attempt_count
+b00619a3-6f82-4ae0-bdec-74ac15762047  default  demo.echo  succeeded  1
 ```
 
 GCP firewall proof for the PulseQueue network:
