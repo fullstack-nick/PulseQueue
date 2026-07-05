@@ -16,7 +16,7 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $go = "C:\Program Files\Go\bin\go.exe"
 
 function Invoke-ComposeDeploy {
-  $args = @(
+  $deployArgs = @(
     "-ProjectId", $ProjectId,
     "-Zone", $Zone,
     "-Instance", $Instance,
@@ -25,9 +25,9 @@ function Invoke-ComposeDeploy {
     "-BuildImageLocally"
   )
   if ($EnableObservability) {
-    $args += @("-EnableObservability", "-GrafanaAdminUser", $GrafanaAdminUser, "-GrafanaAdminPassword", $GrafanaAdminPassword)
+    $deployArgs += @("-EnableObservability", "-GrafanaAdminUser", $GrafanaAdminUser, "-GrafanaAdminPassword", $GrafanaAdminPassword)
   }
-  & (Join-Path $PSScriptRoot "deploy.ps1") @args
+  & (Join-Path $PSScriptRoot "deploy.ps1") @deployArgs
 }
 
 function Get-ApiUrl {
