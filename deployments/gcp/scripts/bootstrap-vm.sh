@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+sudo mkdir -p /opt/pulsequeue
+sudo chown -R "$USER":"$USER" /opt/pulsequeue
+if [ -d "$HOME/.docker" ]; then
+  sudo chown -R "$USER":"$USER" "$HOME/.docker" || true
+fi
+
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  docker --version
+  docker compose version
+  exit 0
+fi
+
+export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update
 sudo apt-get install -y ca-certificates curl gnupg
 
@@ -16,9 +29,11 @@ echo \
   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+if command -v docker >/dev/null 2>&1; then
+  sudo apt-get install -y docker-compose-plugin
+else
+  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+fi
 sudo usermod -aG docker "$USER"
-sudo mkdir -p /opt/pulsequeue
-sudo chown -R "$USER":"$USER" /opt/pulsequeue
 docker --version
 docker compose version
