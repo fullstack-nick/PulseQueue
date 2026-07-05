@@ -60,16 +60,40 @@ func (r *Runner) Run(ctx context.Context) error {
 func (r *Runner) tick(ctx context.Context) error {
 	queues := map[string]struct{}{}
 
+	fires, err := r.store.FireDueCronJobs(ctx, r.schedulerID, r.batchSize)
+	if err != nil {
+		return err
+	}
+	for _, fire := range fires {
+		r.logger.Info("scheduler fired cron job",
+			"scheduler_id", r.schedulerID,
+			"cron_job_id", fire.CronJob.ID,
+			"cron_name", fire.CronJob.Name,
+			"job_id", fire.Job.ID,
+			"queue", fire.Job.Queue,
+			"job_type", fire.Job.Type,
+			"scheduled_for", fire.Run.ScheduledFor.Format(time.RFC3339),
+		)
+		queues[fire.Job.Queue] = struct{}{}
+	}
+
 	recovered, err := r.store.RecoverExpiredJobs(ctx, r.batchSize, "job lease expired")
 	if err != nil {
 		return err
 	}
 	for _, job := range recovered {
+		if _, err := r.store.AppendJobLog(ctx, storage.AppendJobLogParams{
+			JobID:   job.ID,
+			Level:   "warn",
+			Message: "job lease recovered",
+		}); err != nil {
+			r.logger.Warn("scheduler job log append failed", "scheduler_id", r.schedulerID, "job_id", job.ID, "error", err)
+		}
 		r.logger.Warn("scheduler recovered expired job",
 			"scheduler_id", r.schedulerID,
 			"job_id", job.ID,
 			"queue", job.Queue,
-			"type", job.Type,
+			"job_type", job.Type,
 			"status", job.Status,
 			"attempts", job.AttemptCount,
 		)

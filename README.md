@@ -33,6 +33,14 @@ Phase 3 adds distributed worker and scheduler coordination:
 - REST/CLI worker visibility
 - Docker Compose scheduler service for local and GCP VM deployment
 
+Phase 4 adds command-line operations and cron/log visibility:
+
+- UTC 5-field cron jobs that enqueue normal durable jobs
+- Active-active scheduler duplicate protection for cron fires
+- Durable per-job logs retrievable through REST and CLI
+- Queue summaries, manual retry, and queued-job cancellation
+- Expanded Cobra CLI for cron, queues, logs, retry, and cancel
+
 ## Quickstart
 
 Create a local env file:
@@ -91,6 +99,17 @@ go run ./cmd/pulsequeue jobs submit --type demo.echo --delay-seconds 10 --payloa
 go run ./cmd/pulsequeue workers list
 ```
 
+Exercise Phase 4 CLI operations:
+
+```powershell
+go run ./cmd/pulsequeue queues list
+go run ./cmd/pulsequeue cron create --name every-minute-demo --schedule "* * * * *" --type demo.echo --payload '{"message":"from cron"}'
+go run ./cmd/pulsequeue cron list
+go run ./cmd/pulsequeue jobs logs JOB_ID
+go run ./cmd/pulsequeue jobs cancel QUEUED_JOB_ID
+go run ./cmd/pulsequeue jobs retry DEAD_LETTER_OR_CANCELLED_JOB_ID
+```
+
 ## API
 
 Unauthenticated:
@@ -107,7 +126,15 @@ POST /jobs
 GET  /jobs
 GET  /jobs/{id}
 GET  /jobs/{id}/attempts
+GET  /jobs/{id}/logs
+POST /jobs/{id}/retry
+POST /jobs/{id}/cancel
 GET  /workers
+GET  /queues
+POST /cron
+GET  /cron
+POST /cron/{id-or-name}/enable
+POST /cron/{id-or-name}/disable
 ```
 
 Example:

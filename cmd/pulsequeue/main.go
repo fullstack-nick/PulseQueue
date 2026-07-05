@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -45,6 +46,8 @@ func newRootCommand() *cobra.Command {
 	cmd.AddCommand(newHealthCommand())
 	cmd.AddCommand(newJobsCommand())
 	cmd.AddCommand(newWorkersCommand())
+	cmd.AddCommand(newQueuesCommand())
+	cmd.AddCommand(newCronCommand())
 	return cmd
 }
 
@@ -209,6 +212,9 @@ func newJobsCommand() *cobra.Command {
 	cmd.AddCommand(newJobsListCommand())
 	cmd.AddCommand(newJobsStatusCommand())
 	cmd.AddCommand(newJobsAttemptsCommand())
+	cmd.AddCommand(newJobsLogsCommand())
+	cmd.AddCommand(newJobsRetryCommand())
+	cmd.AddCommand(newJobsCancelCommand())
 	return cmd
 }
 
@@ -360,6 +366,106 @@ func newJobsAttemptsCommand() *cobra.Command {
 	return cmd
 }
 
+func newJobsLogsCommand() *cobra.Command {
+	var output string
+	var limit int32
+	cmd := &cobra.Command{
+		Use:   "logs <job-id>",
+		Short: "List durable logs for a job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := config.Load()
+			if err := cfg.ValidateClient(); err != nil {
+				return err
+			}
+			var result struct {
+				Logs []storage.JobLog `json:"logs"`
+			}
+			path := fmt.Sprintf("/jobs/%s/logs?limit=%d", url.PathEscape(args[0]), limit)
+			if err := doJSON(cmd.Context(), cfg, http.MethodGet, path, nil, &result); err != nil {
+				return err
+			}
+			if output == "json" {
+				return printJSON(result)
+			}
+			for _, log := range result.Logs {
+				fields := strings.TrimSpace(string(log.Fields))
+				if fields == "" || fields == "{}" {
+					fmt.Printf("%s\t%s\t%s\n", log.Timestamp.Format(time.RFC3339), log.Level, log.Message)
+					continue
+				}
+				fmt.Printf("%s\t%s\t%s\t%s\n", log.Timestamp.Format(time.RFC3339), log.Level, log.Message, fields)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().Int32Var(&limit, "limit", 100, "maximum rows")
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func newJobsRetryCommand() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{
+		Use:   "retry <job-id>",
+		Short: "Retry a failed, dead-lettered, or cancelled job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := config.Load()
+			if err := cfg.ValidateClient(); err != nil {
+				return err
+			}
+			var result struct {
+				Job storage.Job `json:"job"`
+			}
+			if err := doJSON(cmd.Context(), cfg, http.MethodPost, "/jobs/"+url.PathEscape(args[0])+"/retry", nil, &result); err != nil {
+				return err
+			}
+			if output == "json" {
+				return printJSON(result)
+			}
+			fmt.Printf("retried job %s status=%s queue=%s attempts=%d max_attempts=%d\n",
+				result.Job.ID,
+				result.Job.Status,
+				result.Job.Queue,
+				result.Job.AttemptCount,
+				result.Job.MaxAttempts,
+			)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func newJobsCancelCommand() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{
+		Use:   "cancel <job-id>",
+		Short: "Cancel a queued or retry-scheduled job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := config.Load()
+			if err := cfg.ValidateClient(); err != nil {
+				return err
+			}
+			var result struct {
+				Job storage.Job `json:"job"`
+			}
+			if err := doJSON(cmd.Context(), cfg, http.MethodPost, "/jobs/"+url.PathEscape(args[0])+"/cancel", nil, &result); err != nil {
+				return err
+			}
+			if output == "json" {
+				return printJSON(result)
+			}
+			fmt.Printf("cancelled job %s status=%s queue=%s\n", result.Job.ID, result.Job.Status, result.Job.Queue)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
 func newWorkersCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "workers",
@@ -397,6 +503,213 @@ func newWorkersListCommand() *cobra.Command {
 					worker.LastHeartbeatAt.Format(time.RFC3339),
 				)
 			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func newQueuesCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "queues",
+		Short: "Inspect queues",
+	}
+	cmd.AddCommand(newQueuesListCommand())
+	return cmd
+}
+
+func newQueuesListCommand() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List queue summaries",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg := config.Load()
+			if err := cfg.ValidateClient(); err != nil {
+				return err
+			}
+			var result struct {
+				Queues []storage.QueueSummary `json:"queues"`
+			}
+			if err := doJSON(cmd.Context(), cfg, http.MethodGet, "/queues", nil, &result); err != nil {
+				return err
+			}
+			if output == "json" {
+				return printJSON(result)
+			}
+			for _, queue := range result.Queues {
+				oldest := ""
+				if queue.OldestAvailableAt != nil {
+					oldest = " oldest_available_at=" + queue.OldestAvailableAt.Format(time.RFC3339)
+				}
+				fmt.Printf("%s\ttotal=%d\tqueued=%d\tretry_scheduled=%d\trunning=%d\tsucceeded=%d\tdead_letter=%d\tcancelled=%d\tactive_workers=%d%s\n",
+					queue.Queue,
+					queue.TotalJobs,
+					queue.Queued,
+					queue.RetryScheduled,
+					queue.Running,
+					queue.Succeeded,
+					queue.DeadLetter,
+					queue.Cancelled,
+					queue.ActiveWorkers,
+					oldest,
+				)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func newCronCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cron",
+		Short: "Manage cron jobs",
+	}
+	cmd.AddCommand(newCronCreateCommand())
+	cmd.AddCommand(newCronListCommand())
+	cmd.AddCommand(newCronSetEnabledCommand("enable", true))
+	cmd.AddCommand(newCronSetEnabledCommand("disable", false))
+	return cmd
+}
+
+func newCronCreateCommand() *cobra.Command {
+	var name, queue, jobType, payload, schedule, output string
+	var priority, maxAttempts, timeoutSeconds int32
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a cron job",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if strings.TrimSpace(name) == "" {
+				return errors.New("--name is required")
+			}
+			if strings.TrimSpace(schedule) == "" {
+				return errors.New("--schedule is required")
+			}
+			if strings.TrimSpace(jobType) == "" {
+				return errors.New("--type is required")
+			}
+			cfg := config.Load()
+			if err := cfg.ValidateClient(); err != nil {
+				return err
+			}
+			rawPayload, err := readPayload(payload)
+			if err != nil {
+				return err
+			}
+			body := api.CreateCronJobRequest{
+				Name:           name,
+				Queue:          queue,
+				Type:           jobType,
+				Payload:        rawPayload,
+				Schedule:       schedule,
+				Priority:       priority,
+				MaxAttempts:    maxAttempts,
+				TimeoutSeconds: timeoutSeconds,
+			}
+			var result struct {
+				CronJob storage.CronJob `json:"cron_job"`
+			}
+			if err := doJSON(cmd.Context(), cfg, http.MethodPost, "/cron", body, &result); err != nil {
+				return err
+			}
+			if output == "json" {
+				return printJSON(result)
+			}
+			fmt.Printf("created cron %s id=%s schedule=%q next_run_at=%s\n",
+				result.CronJob.Name,
+				result.CronJob.ID,
+				result.CronJob.Schedule,
+				result.CronJob.NextRunAt.Format(time.RFC3339),
+			)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", "cron job name")
+	cmd.Flags().StringVar(&queue, "queue", "default", "queue name")
+	cmd.Flags().StringVar(&jobType, "type", "demo.echo", "job type")
+	cmd.Flags().StringVar(&payload, "payload", "{}", "JSON payload, @file path, or file path")
+	cmd.Flags().StringVar(&schedule, "schedule", "", "5-field UTC cron schedule")
+	cmd.Flags().Int32Var(&priority, "priority", 0, "job priority")
+	cmd.Flags().Int32Var(&maxAttempts, "max-attempts", 1, "maximum attempts")
+	cmd.Flags().Int32Var(&timeoutSeconds, "timeout-seconds", 0, "job timeout in seconds, 0 disables timeout")
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func newCronListCommand() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List cron jobs",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg := config.Load()
+			if err := cfg.ValidateClient(); err != nil {
+				return err
+			}
+			var result struct {
+				CronJobs []storage.CronJob `json:"cron_jobs"`
+			}
+			if err := doJSON(cmd.Context(), cfg, http.MethodGet, "/cron", nil, &result); err != nil {
+				return err
+			}
+			if output == "json" {
+				return printJSON(result)
+			}
+			for _, cronJob := range result.CronJobs {
+				last := ""
+				if cronJob.LastRunAt != nil {
+					last = " last_run_at=" + cronJob.LastRunAt.Format(time.RFC3339)
+				}
+				fmt.Printf("%s\t%s\t%s\t%s\tenabled=%t\tnext_run_at=%s%s\n",
+					cronJob.ID,
+					cronJob.Name,
+					cronJob.Queue,
+					cronJob.Schedule,
+					cronJob.Enabled,
+					cronJob.NextRunAt.Format(time.RFC3339),
+					last,
+				)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func newCronSetEnabledCommand(name string, enabled bool) *cobra.Command {
+	verb := "Enable"
+	if !enabled {
+		verb = "Disable"
+	}
+	var output string
+	cmd := &cobra.Command{
+		Use:   name + " <id-or-name>",
+		Short: verb + " a cron job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := config.Load()
+			if err := cfg.ValidateClient(); err != nil {
+				return err
+			}
+			var result struct {
+				CronJob storage.CronJob `json:"cron_job"`
+			}
+			if err := doJSON(cmd.Context(), cfg, http.MethodPost, "/cron/"+url.PathEscape(args[0])+"/"+name, nil, &result); err != nil {
+				return err
+			}
+			if output == "json" {
+				return printJSON(result)
+			}
+			fmt.Printf("%s cron %s enabled=%t next_run_at=%s\n",
+				name,
+				result.CronJob.Name,
+				result.CronJob.Enabled,
+				result.CronJob.NextRunAt.Format(time.RFC3339),
+			)
 			return nil
 		},
 	}

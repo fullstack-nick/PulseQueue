@@ -58,11 +58,42 @@ func TestRootCommandIncludesSchedulerAndWorkers(t *testing.T) {
 	if _, _, err := cmd.Find([]string{"workers", "list"}); err != nil {
 		t.Fatal("expected workers list command")
 	}
+	if _, _, err := cmd.Find([]string{"queues", "list"}); err != nil {
+		t.Fatal("expected queues list command")
+	}
+	if _, _, err := cmd.Find([]string{"cron", "list"}); err != nil {
+		t.Fatal("expected cron list command")
+	}
+	if _, _, err := cmd.Find([]string{"jobs", "logs", "job-id"}); err != nil {
+		t.Fatal("expected jobs logs command")
+	}
+	if _, _, err := cmd.Find([]string{"jobs", "retry", "job-id"}); err != nil {
+		t.Fatal("expected jobs retry command")
+	}
+	if _, _, err := cmd.Find([]string{"jobs", "cancel", "job-id"}); err != nil {
+		t.Fatal("expected jobs cancel command")
+	}
 }
 
 func TestWorkerCommandAcceptsConcurrencyGreaterThanOne(t *testing.T) {
 	cmd := newWorkerCommand()
 	if err := cmd.Flags().Set("concurrency", "3"); err != nil {
 		t.Fatalf("expected concurrency flag to accept 3: %v", err)
+	}
+}
+
+func TestCronCreateIncludesPhase4Flags(t *testing.T) {
+	cmd := newCronCreateCommand()
+	for _, name := range []string{"name", "schedule", "payload", "output"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Fatalf("expected %s flag", name)
+		}
+	}
+}
+
+func TestJobsLogsIncludesLimitFlag(t *testing.T) {
+	cmd := newJobsLogsCommand()
+	if cmd.Flags().Lookup("limit") == nil {
+		t.Fatal("expected limit flag")
 	}
 }

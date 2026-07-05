@@ -202,6 +202,10 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob, slot i
 		"slot", slot,
 		"status", job.Status,
 	)
+	r.appendJobLog(context.Background(), job, attempt, "info", "job started", map[string]any{
+		"slot":   slot,
+		"status": job.Status,
+	})
 
 	runCtx := ctx
 	cancel := func() {}
@@ -234,6 +238,12 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob, slot i
 		)
 		return
 	}
+	durationMS := time.Since(started).Milliseconds()
+	r.appendJobLog(context.Background(), job, attempt, "info", "job succeeded", map[string]any{
+		"slot":        slot,
+		"status":      storage.StatusSucceeded,
+		"duration_ms": durationMS,
+	})
 	r.logger.Info("job succeeded",
 		"job_id", job.ID,
 		"attempt_id", attempt.ID,
@@ -243,7 +253,7 @@ func (r *Runner) execute(ctx context.Context, claimed storage.ClaimedJob, slot i
 		"worker_id", r.workerID,
 		"slot", slot,
 		"status", storage.StatusSucceeded,
-		"duration_ms", time.Since(started).Milliseconds(),
+		"duration_ms", durationMS,
 	)
 }
 
@@ -316,6 +326,12 @@ func (r *Runner) fail(ctx context.Context, claimed storage.ClaimedJob, message s
 		)
 		return
 	}
+	r.appendJobLog(ctx, job, attempt, "warn", "job failed", map[string]any{
+		"slot":        slot,
+		"status":      updated.Status,
+		"duration_ms": duration.Milliseconds(),
+		"error":       message,
+	})
 	r.logger.Warn("job failed",
 		"job_id", job.ID,
 		"attempt_id", attempt.ID,
@@ -328,4 +344,33 @@ func (r *Runner) fail(ctx context.Context, claimed storage.ClaimedJob, message s
 		"duration_ms", duration.Milliseconds(),
 		"error", message,
 	)
+}
+
+func (r *Runner) appendJobLog(ctx context.Context, job storage.Job, attempt storage.JobAttempt, level, message string, fields map[string]any) {
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	fields["attempt"] = attempt.AttemptNumber
+	fields["attempt_id"] = attempt.ID
+	fields["job_type"] = job.Type
+	fields["queue"] = job.Queue
+	fields["worker_id"] = r.workerID
+	attemptID := attempt.ID
+	if _, err := r.store.AppendJobLog(ctx, storage.AppendJobLogParams{
+		JobID:     job.ID,
+		AttemptID: &attemptID,
+		Level:     level,
+		Message:   message,
+		Fields:    mustJSON(fields),
+	}); err != nil {
+		r.logger.Warn("worker job log append failed", "job_id", job.ID, "attempt_id", attempt.ID, "error", err)
+	}
+}
+
+func mustJSON(value any) json.RawMessage {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return raw
 }

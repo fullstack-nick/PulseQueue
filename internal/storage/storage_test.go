@@ -445,6 +445,162 @@ func TestWorkerRegistrationHeartbeatAndStatuses(t *testing.T) {
 	}
 }
 
+func TestPhase4JobLogsRetryCancelAndQueues(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	job := createTestJob(t, store, CreateJobParams{
+		Queue:        "default",
+		Type:         "demo.echo",
+		Payload:      json.RawMessage(`{"message":"cancel me"}`),
+		MaxAttempts:  1,
+		DelaySeconds: 60,
+	})
+
+	cancelled, err := store.CancelJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != StatusCancelled {
+		t.Fatalf("cancelled status = %s, want %s", cancelled.Status, StatusCancelled)
+	}
+
+	retried, err := store.RetryJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != StatusQueued {
+		t.Fatalf("retried status = %s, want %s", retried.Status, StatusQueued)
+	}
+	if retried.MaxAttempts < retried.AttemptCount+1 {
+		t.Fatalf("max_attempts = %d, attempt_count = %d", retried.MaxAttempts, retried.AttemptCount)
+	}
+
+	logs, err := store.ListJobLogs(ctx, job.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("log count = %d, want 2", len(logs))
+	}
+	if logs[0].Message != "job cancelled" || logs[1].Message != "job manually retried" {
+		t.Fatalf("unexpected log messages: %#v", logs)
+	}
+
+	queues, err := store.ListQueues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queues) != 1 {
+		t.Fatalf("queue count = %d, want 1", len(queues))
+	}
+	if queues[0].Queue != "default" || queues[0].Queued != 1 || queues[0].TotalJobs != 1 {
+		t.Fatalf("unexpected queue summary: %#v", queues[0])
+	}
+}
+
+func TestPhase4CronFireCreatesOneJobAndLog(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	cronJob, err := store.CreateCronJob(ctx, CreateCronJobParams{
+		Name:        "minute-report",
+		Queue:       "reports",
+		Type:        "demo.echo",
+		Payload:     json.RawMessage(`{"message":"from cron"}`),
+		Schedule:    "* * * * *",
+		MaxAttempts: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE cron_jobs SET next_run_at = date_trunc('minute', now()) - interval '1 minute' WHERE id = $1`, cronJob.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	fires, err := store.FireDueCronJobs(ctx, "scheduler-a", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fires) != 1 {
+		t.Fatalf("fire count = %d, want 1", len(fires))
+	}
+	if fires[0].Job.Queue != "reports" || fires[0].Job.Type != "demo.echo" {
+		t.Fatalf("unexpected fired job: %#v", fires[0].Job)
+	}
+
+	logs, err := store.ListJobLogs(ctx, fires[0].Job.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].Message != "cron job fired" {
+		t.Fatalf("unexpected logs: %#v", logs)
+	}
+
+	firesAgain, err := store.FireDueCronJobs(ctx, "scheduler-b", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firesAgain) != 0 {
+		t.Fatalf("second fire count = %d, want 0", len(firesAgain))
+	}
+}
+
+func TestPhase4ConcurrentCronFireCreatesOneRun(t *testing.T) {
+	store := openIntegrationStore(t)
+	ctx := context.Background()
+
+	cronJob, err := store.CreateCronJob(ctx, CreateCronJobParams{
+		Name:        "concurrent-cron",
+		Queue:       "default",
+		Type:        "demo.echo",
+		Payload:     json.RawMessage(`{}`),
+		Schedule:    "* * * * *",
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE cron_jobs SET next_run_at = date_trunc('minute', now()) - interval '1 minute' WHERE id = $1`, cronJob.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	const schedulers = 2
+	counts := make(chan int, schedulers)
+	errs := make(chan error, schedulers)
+	for i := 0; i < schedulers; i++ {
+		go func(i int) {
+			fires, err := store.FireDueCronJobs(ctx, "scheduler-concurrent", 10)
+			if err != nil {
+				errs <- err
+				return
+			}
+			counts <- len(fires)
+		}(i)
+	}
+
+	total := 0
+	for i := 0; i < schedulers; i++ {
+		select {
+		case err := <-errs:
+			t.Fatal(err)
+		case count := <-counts:
+			total += count
+		}
+	}
+	if total != 1 {
+		t.Fatalf("total fires = %d, want 1", total)
+	}
+
+	var runCount int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM cron_runs WHERE cron_job_id = $1`, cronJob.ID).Scan(&runCount); err != nil {
+		t.Fatal(err)
+	}
+	if runCount != 1 {
+		t.Fatalf("cron run count = %d, want 1", runCount)
+	}
+}
+
 func TestConcurrentIdempotencyKeySubmissionCreatesOneJob(t *testing.T) {
 	store := openIntegrationStore(t)
 	ctx := context.Background()
@@ -515,7 +671,7 @@ func openIntegrationStore(t *testing.T) *Store {
 	if err := store.ApplyMigrations(ctx, migrationsDir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.pool.Exec(ctx, `TRUNCATE TABLE job_attempts, jobs, workers RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := store.pool.Exec(ctx, `TRUNCATE TABLE cron_runs, job_logs, job_attempts, cron_jobs, jobs, workers RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	return store
