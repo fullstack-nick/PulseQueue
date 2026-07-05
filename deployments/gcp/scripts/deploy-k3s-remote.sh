@@ -9,6 +9,7 @@ CLEANUP_AFTER="${5:-false}"
 
 ROOT="/opt/pulsequeue/phase6"
 SECRET_FILE="/tmp/pulsequeue-k3s-secrets.env"
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 
 cleanup_k3s() {
   timeout 90s helm uninstall pulsequeue -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
@@ -36,16 +37,29 @@ wait_for_rollouts() {
   timeout 210s kubectl -n "$NAMESPACE" rollout status deployment/pulsequeue-scheduler --timeout=180s
 }
 
+read_completed_pod_logs() {
+  local name="$1"
+  local timeout_seconds="${2:-180}"
+  if ! timeout "${timeout_seconds}s" kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$name" --timeout="${timeout_seconds}s" >/dev/null; then
+    timeout 30s kubectl -n "$NAMESPACE" logs "$name" || true
+    timeout 30s kubectl -n "$NAMESPACE" describe pod "$name" >&2 || true
+    timeout 30s kubectl -n "$NAMESPACE" delete pod "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    return 1
+  fi
+  timeout 30s kubectl -n "$NAMESPACE" logs "$name"
+  timeout 30s kubectl -n "$NAMESPACE" delete pod "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+
 run_cli() {
   local name
   name="pulsequeue-proof-$(date +%s%N)"
   timeout 180s kubectl -n "$NAMESPACE" run "$name" \
-    --rm -i \
     --restart=Never \
     --image="$IMAGE_REF" \
     --env="PULSEQUEUE_API_URL=http://pulsequeue-api:8080" \
     --env="PULSEQUEUE_OPERATOR_TOKEN=$OPERATOR_TOKEN" \
-    --command -- /usr/local/bin/pulsequeue "$@"
+    --command -- /usr/local/bin/pulsequeue "$@" >/dev/null
+  read_completed_pod_logs "$name" 180
 }
 
 prove_app() {
@@ -140,6 +154,7 @@ timeout 30s kubectl -n "$NAMESPACE" create secret generic pulsequeue-secrets \
 
 case "$MODE" in
   manifests)
+    sed -i "s#ghcr.io/fullstack-nick/pulsequeue:main#$IMAGE_REF#g" deployments/k8s/*.yaml
     timeout 120s kubectl apply -f deployments/k8s
     timeout 60s kubectl -n "$NAMESPACE" set image deployment/pulsequeue-api api="$IMAGE_REF"
     timeout 60s kubectl -n "$NAMESPACE" set image deployment/pulsequeue-worker worker="$IMAGE_REF"

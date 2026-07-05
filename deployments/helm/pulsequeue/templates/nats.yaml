@@ -42,7 +42,7 @@ spec:
         - name: nats
           image: {{ .Values.nats.image | quote }}
           imagePullPolicy: IfNotPresent
-          args: ["-js", "-sd", "/data"]
+          args: ["-js", "-sd", "/data", "-m", "8222"]
           ports:
             - name: client
               containerPort: 4222

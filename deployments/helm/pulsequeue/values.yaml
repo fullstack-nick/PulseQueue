@@ -5,6 +5,9 @@ image:
   tag: main
   pullPolicy: IfNotPresent
 
+init:
+  image: busybox:1.36
+
 secrets:
   existingSecret: pulsequeue-secrets
 
@@ -32,7 +35,7 @@ postgres:
   storage: 1Gi
   settings:
     sharedBuffers: 16MB
-    maxConnections: "20"
+    maxConnections: "100"
     workMem: 2MB
   resources:
     requests:

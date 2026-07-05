@@ -19,6 +19,14 @@ spec:
         app.kubernetes.io/component: scheduler
         app.kubernetes.io/part-of: pulsequeue
     spec:
+      initContainers:
+        - name: wait-for-api
+          image: {{ .Values.init.image | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              until wget -q -O- http://pulsequeue-api:8080/health/ready | grep -q '"ready"'; do sleep 2; done
       containers:
         - name: scheduler
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

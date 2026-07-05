@@ -1231,23 +1231,47 @@ Keep Docker Compose as the always-on free-tier runtime. Publish Phase 6 images t
 Live proof status on 2026-07-05:
 
 ```text
-Docker Compose was restored as the live default runtime after k3s attempts.
+Docker Compose was verified first on the e2-micro VM:
+- /health/live 200
+- /health/ready 200
+- demo.echo job e7c646db-1ed2-4ab7-8703-75fe26d4dac0 succeeded with attempt_count 1
+- PostgreSQL readback returned demo.echo | succeeded | 1
+
+The e2-micro VM was too constrained for a reliable full k3s proof, so the VM was stopped, resized temporarily to n2-standard-8 using trial credits, and resized back after verification.
+
+Raw k3s manifests proved the full stack on GCP-hosted k3s:
+- image ghcr.io/fullstack-nick/pulsequeue:sha-824ad57
+- k3s v1.36.2+k3s1
+- API, worker, scheduler, PostgreSQL, and NATS rollouts completed
+- /health/live 200
+- /health/ready 200
+- demo.echo job 2b3ef676-4495-44dd-a1c8-5fbdf3fdeb40 succeeded with attempt_count 1
+- PostgreSQL readback returned demo.echo | succeeded | 1
+- services stayed ClusterIP only
+- pods had zero restarts
+
+Helm proved the same full stack on the same GCP-hosted k3s runtime.
+
+Massive live feature proof passed:
+- run_id phase6-20260705194018
+- gRPC health SERVING
+- NATS /varz readiness on monitor port 8222
+- REST and CLI job paths
+- retries, failures, dead-letter, idempotency, delayed jobs, cron, job logs
+- worker heartbeats and scheduler expired-lease recovery
+- metrics and DB readbacks
+- stress batch 200 submitted, 200 succeeded, 0 bad, 0 active
+- worker HPA held 4 worker pods with concurrency 4
+- final k3s pods had zero restarts
+
+Docker Compose was restored as the live default runtime on e2-micro after k3s proof.
 Final Compose proof passed against http://35.254.165.175:8080:
 - /health/live 200
 - /health/ready 200
-- demo.echo job 4cb09668-d405-44d6-bd1d-60443b011b15 succeeded with attempt_count 1
+- demo.echo job 25d2b636-a47a-4931-9cb6-ae1d45407d4d succeeded with attempt_count 1
 - PostgreSQL readback returned demo.echo | succeeded | 1
 - k3s service was inactive after cleanup
-
-Raw k3s manifest proof did not complete on the e2-micro VM.
-The closest attempt used k3s v1.29.15+k3s1, disabled Traefik, ServiceLB, Helm controller, metrics-server, and network policy, used 1 GiB swap, stopped Docker/containerd, and placed the k3s SQLite datastore on tmpfs.
-Kubernetes created the namespace, secret, services, StatefulSets, Deployments, and HPA and pulled the GHCR image ghcr.io/fullstack-nick/pulsequeue:sha-e4c54d2.
-The VM then saturated: kubectl calls timed out, serial logs showed apiserver/kine timeouts, and the raw rollout did not reach a stable app proof.
-Helm live proof was not attempted because the raw k3s runtime was not stable enough to prove the app safely.
-
-Do not mark Phase 6 complete until either:
-- the existing VM can run the full k3s app proof reliably after further reductions, or
-- the plan is explicitly changed to allow a larger or separate proof host.
+- final VM state was RUNNING e2-micro
 ```
 
 ## 14. Failure Scenarios to Demonstrate

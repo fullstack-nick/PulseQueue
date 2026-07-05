@@ -36,6 +36,8 @@ $env:PULSEQUEUE_API_URL="http://VM_PUBLIC_IP:8080"
 & "C:\Program Files\Go\bin\go.exe" run ./cmd/pulsequeue jobs submit --type demo.echo --payload '{"message":"compose proof"}'
 ```
 
+When redeploying against an existing Compose PostgreSQL volume, keep the existing `PostgresPassword` or rotate the `pulsequeue` database role password before starting the API. PostgreSQL stores the initialized role password in the volume; changing only the generated `.env` value makes the restored API fail authentication.
+
 Inspect services:
 
 ```powershell
@@ -89,6 +91,8 @@ Helm uses the same runtime secret as the raw manifest proof. No token, password,
 ```
 
 This script checks Terraform drift, deploys and proves Compose, proves raw k3s manifests, proves Helm, cleans up k3s workloads, restores Compose, and runs a final live smoke job.
+
+The strict e2-micro VM remains the default runtime, but it is not large enough for comfortable full-cluster k3s plus stress verification. For a planned proof window, stop the VM cleanly, resize it temporarily, run the k3s/Helm proof, then clean up k3s and resize back to e2-micro before leaving the environment.
 
 ## Rollback to Compose
 

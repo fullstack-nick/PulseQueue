@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SWAP_FILE="/swapfile"
-INSTALL_K3S_CHANNEL="${INSTALL_K3S_CHANNEL:-v1.29}"
+INSTALL_K3S_CHANNEL="${INSTALL_K3S_CHANNEL:-stable}"
 if ! sudo swapon --show=NAME | grep -qx "$SWAP_FILE"; then
   if [ ! -f "$SWAP_FILE" ]; then
     sudo fallocate -l 1G "$SWAP_FILE"
@@ -26,9 +26,6 @@ sudo tee /etc/rancher/k3s/config.yaml >/dev/null <<'YAML'
 disable:
   - traefik
   - servicelb
-  - helm-controller
-  - metrics-server
-disable-network-policy: true
 write-kubeconfig-mode: "0644"
 YAML
 

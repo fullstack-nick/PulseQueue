@@ -51,7 +51,7 @@ runtime Secret
 runtime ConfigMap
 ```
 
-k3s services are ClusterIP only. The proof uses a short maintenance window: stop Compose, run the full app on k3s, submit and complete real jobs, read PostgreSQL state from the in-cluster database, clean up k3s workloads, and restore Compose as the always-on runtime.
+k3s services are ClusterIP only. The proof uses a short maintenance window: stop Compose, run the full app on k3s, submit and complete real jobs, read PostgreSQL state from the in-cluster database, clean up k3s workloads, and restore Compose as the always-on runtime. Full stress proof can temporarily resize the same VM when e2-micro memory and CPU are not enough; the accepted end state is still Compose on e2-micro with k3s stopped.
 
 ## Image Flow
 

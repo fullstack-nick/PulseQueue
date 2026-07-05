@@ -347,6 +347,77 @@ Each phase is complete only when:
 - PostgreSQL and NATS are not exposed through public firewall rules.
 - Kubernetes and Helm artifacts are verified on GCP-hosted k3s when they are part of the phase.
 
+## Phase 6 Live Proof
+
+Recorded on 2026-07-05 UTC / 2026-07-05 Europe/Berlin.
+
+```text
+GitHub repo: https://github.com/fullstack-nick/PulseQueue
+Implementation commit: 824ad57
+GitHub Actions: ci run 28747756264 succeeded
+Published image: ghcr.io/fullstack-nick/pulsequeue:sha-824ad57
+GCP project: pulsequeue-r7m5o9ld
+GCP VM: pulsequeue-phase1
+GCP zone: us-central1-a
+Temporary proof machine: n2-standard-8
+Restored machine: e2-micro
+Live API after restore: http://35.254.165.175:8080
+Default runtime after proof: Docker Compose
+```
+
+Baseline Compose proof before the k3s window:
+
+```text
+/health/live 200 {"status":"live"}
+/health/ready 200 {"status":"ready"}
+demo.echo job e7c646db-1ed2-4ab7-8703-75fe26d4dac0 succeeded with attempt_count 1
+PostgreSQL readback returned demo.echo | succeeded | 1
+```
+
+Raw k3s manifest proof:
+
+```text
+k3s: v1.36.2+k3s1
+Namespace: pulsequeue-k3s
+Image: ghcr.io/fullstack-nick/pulsequeue:sha-824ad57
+API, worker, scheduler, PostgreSQL, NATS: rollout complete
+/health/live 200
+/health/ready 200
+demo.echo job 2b3ef676-4495-44dd-a1c8-5fbdf3fdeb40 succeeded with attempt_count 1
+PostgreSQL readback returned demo.echo | succeeded | 1
+Services: ClusterIP only
+Worker HPA: min 1, max 2
+Pods: zero restarts
+CleanupAfterProof: namespace removed
+```
+
+Helm and full app feature proof:
+
+```text
+Helm deployment: succeeded on the same k3s runtime
+Full proof run: phase6-20260705194018
+gRPC health: SERVING
+NATS readiness: /varz returned server state on monitor port 8222
+REST, CLI, retries, failures, DLQ, idempotency, delays, cron, job logs,
+worker heartbeats, scheduler recovery, metrics, and DB readbacks: passed
+Stress batch: 200 submitted, 200 succeeded, 0 bad, 0 active
+Worker scale proof: HPA held 4 worker pods with concurrency 4 during stress
+Final k3s pods: zero restarts
+```
+
+Final restored Compose proof:
+
+```text
+VM state: RUNNING e2-micro
+k3s service: inactive
+/health/live 200 {"status":"live"}
+/health/ready 200 {"status":"ready"}
+demo.echo job 25d2b636-a47a-4931-9cb6-ae1d45407d4d succeeded with attempt_count 1
+PostgreSQL readback returned demo.echo | succeeded | 1
+NATS monitor endpoint: http://127.0.0.1:8222/varz returned server state
+Public exposure: API 8080 and gRPC 9090 only; PostgreSQL, NATS, Prometheus, and Grafana stayed private
+```
+
 ## Phase 1 Live Proof
 
 Recorded on 2026-07-04.

@@ -43,7 +43,7 @@ spec:
             - -c
             - shared_buffers=16MB
             - -c
-            - max_connections=20
+            - max_connections=100
             - -c
             - work_mem=2MB
           ports:
@@ -85,7 +85,7 @@ spec:
               memory: 384Mi
           volumeMounts:
             - name: postgres-data
-              mountPath: /var/lib/postgresql/data
+              mountPath: /var/lib/postgresql
   volumeClaimTemplates:
     - metadata:
         name: postgres-data

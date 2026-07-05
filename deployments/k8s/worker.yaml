@@ -19,6 +19,14 @@ spec:
         app.kubernetes.io/component: worker
         app.kubernetes.io/part-of: pulsequeue
     spec:
+      initContainers:
+        - name: wait-for-api
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until wget -q -O- http://pulsequeue-api:8080/health/ready | grep -q '"ready"'; do sleep 2; done
       containers:
         - name: worker
           image: ghcr.io/fullstack-nick/pulsequeue:main
